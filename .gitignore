@@ -61,3 +61,9 @@ build-vision-cuda12.bat
 
 /.ccache/
 /.rocm-win/
+
+# local notes written by scheduled scans (kept out of version control)
+security-findings.local.md
+bug-hunter-state.local.md
+proposed-fixes.local.md
+change-digest-state.local.md
