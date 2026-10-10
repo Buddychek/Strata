@@ -48,7 +48,7 @@ import uuid
 from http.client import HTTPException
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Iterator, Protocol
+from typing import Any, Generator, Iterator, Protocol
 from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -255,7 +255,8 @@ ENGINE_READY_S = _timeout_env("STRATA_ENGINE_READY_S", 900.0)
 # ------------------------------------------------------------------------------------------------ engines
 class Engine(Protocol):
     max_context: int
-    def generate(self, ids: list[int], max_new: int, sampling: dict, cancel: threading.Event) -> Iterator[int]: ...
+    def generate(self, ids: list[int], max_new: int, sampling: dict, cancel: threading.Event,
+                 embeddings: Any = None) -> Generator[int, None, None]: ...
 
 
 class MockEngine:
@@ -269,6 +270,7 @@ class MockEngine:
                                                                                  else script)]
         self.script, self.turns = self.scripts[0], 0
         self.last_prompt: list[int] = []
+        self.last: dict = {}             # the engine's last DONE line; StrataEngine's shape (its clock, so a mock's is the same)
 
     def generate(self, ids, max_new, sampling, cancel, embeddings=None):
         self.last_prompt = list(ids)
@@ -607,7 +609,8 @@ class StrataEngine:
         paths = {k: v for k, v in zip(args, args[1:]) if k in ("--native", "--pack")}
         self.model_path = paths.get("--native") or paths.get("--pack", "pack/full")
         self.log_path = log
-        self.proc, self.pump, self.log = None, None, None
+        self.proc: subprocess.Popen | None = None
+        self.pump, self.log = None, None
         self.ended, self.unloaded = True, True
         self.max_context = int(args[args.index("--max-context") + 1]) if "--max-context" in args else 4096
         self.can_stop = False            # the engine honours a STOP line mid-request (READY <ctx> stop)
@@ -681,14 +684,14 @@ class StrataEngine:
                     self.proc.kill()
                 except OSError:
                     pass
-            try:                                        # its pipes and our handle on its log (the log stays)
+            try:                                        # its pipes; the log handle goes back below, whatever these do
                 self.proc.wait(timeout=5)
                 self.proc.stdin.close()
                 self.proc.stdout.close()
-                if log:
-                    self.log.close()
             except (OSError, subprocess.TimeoutExpired):
                 pass
+            self._close_log()                           # a start that failed must not keep the log open for the
+            #                                         whole session (Windows then refuses to move or delete it)
             why = (f"the engine did not report READY within {ENGINE_READY_S:.0f} s" if timed_out else
                    "the engine exited before it was ready")
             raise RuntimeError(why + (f" (see {log})" if log else "") +
@@ -751,7 +754,14 @@ class StrataEngine:
         proc, lines = self.proc, self.lines             # this process's: a restart replaces both (#344)
         slot_q = self.slot_q
         line = None
-        for line in proc.stdout:
+        if proc is None:                                # started without a process (lazy): publish EOF, stay in step
+            lines.put(None)
+            for q in slot_q:
+                q.put(None)
+            return
+        out = proc.stdout                               # stdout=subprocess.PIPE at start: never None
+        assert out is not None
+        for line in out:
             # checked before batch routing: a fatal line is never a slot's own
             if line.startswith(FATAL_PREFIXES):
                 # release_gpu_waits invalidates the verifier, even if the native
@@ -781,16 +791,19 @@ class StrataEngine:
 
     def death_note(self) -> str:
         """Why the engine most likely ended, from the end of its log: its own watchdog (issue #29), else RAM."""
-        if getattr(self, "silent_note", None):          # #481: the server ended it, not the OS or the engine itself
-            return self.silent_note
+        silent = getattr(self, "silent_note", None)     # #481: the server ended it, not the OS or the engine itself
+        if silent:
+            return silent
         tail = ""
-        try:
-            with open(self.log_path, "rb") as f:
-                f.seek(0, 2)
-                f.seek(max(0, f.tell() - 4096))
-                tail = f.read().decode("utf-8", "replace")
-        except (OSError, TypeError):
-            pass
+        log = self.log_path                                  # str | None; open() takes only a path
+        if log:
+            try:
+                with open(log, "rb") as f:
+                    f.seek(0, 2)
+                    f.seek(max(0, f.tell() - 4096))
+                    tail = f.read().decode("utf-8", "replace")
+            except OSError:
+                pass
         for line in reversed(tail.splitlines()):
             if "issue #29" in line:
                 return ("The engine stopped itself because it had stopped making progress - a hang it caught. Its log "
@@ -872,8 +885,10 @@ class StrataEngine:
                     time.sleep(self.RESTART_RETRY_S)
         finally:
             self.starting = False
-            with self.slot_cv:                   # #1012: wake the requests that waited through it: they go on with the
-                self.slot_cv.notify_all()        # new engine, or (it did not start) end with a clean EngineDied
+            cv = self.__dict__.get("slot_cv")          # a lazy engine that never started has none: nothing waits
+            if cv is not None:
+                with cv:                               # #1012: wake the requests that waited through it: they go on
+                    cv.notify_all()                    # with the new engine, or (it did not start) end cleanly
         self.info = {**info, **self.info}
 
     def _parse_done(self, line):
@@ -1740,10 +1755,22 @@ class StrataEngine:
                 continue
             raise out_of_step(line)
 
+    def _close_log(self):
+        """Give back our handle on the engine's log.  The engine writes through the copy of it it was started with, so
+        closing ours costs nothing it prints; it is what keeps the file from being moved, deleted, or rewritten by a
+        setup run for as long as a failed start's handle is held.  Idempotent (file.close() is)."""
+        log = getattr(self, "log", None)
+        if log not in (None, subprocess.DEVNULL):
+            try:
+                log.close()
+            except OSError:
+                pass
+
     def close(self):
         """End the engine process: QUIT first (the engine frees its memory itself - unpinning tens of GB can take
         a while), then terminate, then kill, each given 20 s.  Raises EngineStuck when it still runs after all three."""
         if self.proc is None:
+            self._close_log()
             return
         try:
             if self.proc.poll() is None:
@@ -1764,6 +1791,9 @@ class StrataEngine:
         except OSError:
             pass
         finally:
+            self._close_log()                           # ours, not the engine's copy: closing it never stops the
+            #                                         engine's lines, and a process that cannot be ended must not
+            #                                         keep the log held for the whole session
             if self.proc.poll() is not None:
                 if self.pump is not None and self.pump.ident is not None:   # a restart can stop before starting it
                     self.pump.join(timeout=2)
@@ -1772,8 +1802,6 @@ class StrataEngine:
                 except OSError:
                     pass
                 self.proc.stdout.close()
-                if self.log not in (None, subprocess.DEVNULL):
-                    self.log.close()
                 self.proc = None
                 self.ended = True
                 self.progress, self.last = None, {}

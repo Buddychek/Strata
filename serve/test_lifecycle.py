@@ -1,8 +1,11 @@
 """Model discovery, on-demand loading and safe unloading over the actual HTTP API."""
 import json
+import contextlib
 import io
 import os
 import subprocess
+import sys
+import tempfile
 import time
 import unittest
 import urllib.error
@@ -124,6 +127,75 @@ class Lifecycle(unittest.TestCase):
         self.assertEqual(engine.max_context, 16384)
         self.assertIsNone(engine.exit_code())
         engine.close()
+
+    def fake_engine(self, d, body):
+        """A fake engine script (the way test_server's fakes run it on Windows too) for the start paths below."""
+        py = Path(d) / "fake_strata.py"
+        if os.name == "nt":
+            py.write_text(body, encoding="utf-8")
+            script = Path(d) / "fake_strata.cmd"
+            script.write_text(f'@"{sys.executable}" "{py}" %*\r\n', encoding="utf-8")
+            return script
+        py.write_text("#!" + sys.executable + "\n" + body, encoding="utf-8")
+        py.chmod(0o700)
+        return py
+
+    def test_a_start_that_times_out_gives_the_log_handle_back(self):
+        """A start that never says READY ends its process and must not keep our handle on the log: the engine writes
+        through its own copy of it, so only ours keeps the file held (Windows: undeletable, unmovable)."""
+        import serve.server as server
+        with tempfile.TemporaryDirectory() as d:
+            log, out = Path(d) / "strata.log", io.StringIO()
+            script = self.fake_engine(d, "import time\ntime.sleep(30)\n")
+            given: list = []
+            real = StrataEngine._close_log
+
+            def close_log(self):
+                given.append(self.log)
+                real(self)
+
+            with mock.patch.object(server, "narrate_start", lambda *a, **k: None), \
+                 mock.patch.object(server, "ENGINE_READY_S", 0.5), \
+                 mock.patch.object(StrataEngine, "_close_log", close_log), contextlib.redirect_stdout(out):
+                with self.assertRaises(RuntimeError) as cm:
+                    StrataEngine(str(script), [], log=str(log))
+            self.assertIn("did not report READY", str(cm.exception))
+            self.assertEqual(len(given), 1, "the start that gave up did not hand the log back")
+            self.assertTrue(given[0].closed, "a failed start keeps its handle on the log")
+            self.assertTrue(log.read_text(encoding="utf-8").startswith("[strata]"), "the start line is in the log")
+            log.unlink()                                  # the server is not holding the file it failed to start
+
+    def test_close_gives_the_log_handle_back_when_the_engine_will_not_end(self):
+        """EngineStuck keeps the process (and says the GPU/RAM are not given back); our handle on its log is ours to
+        return, and the engine's own copy keeps its lines coming."""
+        engine = StrataEngine("missing-executable", [], lazy=True)
+        proc = mock.Mock()
+        proc.stdin, proc.stdout = io.StringIO(), io.StringIO()
+        proc.poll.return_value = None
+        proc.wait.side_effect = subprocess.TimeoutExpired("engine", 2)
+        log = io.StringIO()
+        self.addCleanup(log.close)
+        engine.proc, engine.pump, engine.log = proc, mock.Mock(), log
+        with self.assertRaisesRegex(EngineStuck, "still releasing"):
+            engine.close()
+        self.assertTrue(log.closed)
+        self.assertIs(engine.proc, proc)                  # the process is kept, as EngineStuck says
+
+    def test_a_failed_restart_does_not_keep_the_log_open(self):
+        """restart() re-runs the constructor; when every try exits before READY, the handles of those starts are
+        dropped, so the log stays free for the next start (and for a setup run that rewrites it)."""
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / "strata.log"
+            script = self.fake_engine(d, "import sys\nsys.exit(3)\n")
+            eng = StrataEngine("missing-executable", [], lazy=True)
+            eng.spawn = (str(script), [], None, str(log), None)
+            eng.RESTART_RETRY_S = 0.0
+            with mock.patch("serve.server.narrate_start", lambda *a, **k: None):
+                with self.assertRaises(RuntimeError):
+                    eng.restart()
+            self.assertFalse(eng.starting)
+            self.assertTrue(eng.ended)
+            log.unlink()                                  # no handle left from the three tries that failed
 
     def setUp(self):
         tok = ByteTokenizer()
