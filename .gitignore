@@ -58,6 +58,12 @@ build-vision-cuda12.bat
 .vscode/
 .idea/
 .cursor/
+# Local History extension snapshots (per-file editor history, incl. copies of
+# *.local.md notes) -- local session state, never project source
+.history/
+# Personal Copilot/agent sidecar files (per-machine agent personas) -- local
+# session state, not project source
+.github/agents/
 
 /.ccache/
 /.rocm-win/
