@@ -207,7 +207,7 @@ class Tracing:
         # The first-token anchor is clamped into the request's wall window: a cache-hot request can read the prompt
         # before the wall the record settled, and a stream that is still finishing can end before the engine's
         # decode_ms claims - a span is drawn inside the window, never as a negative slice
-        first = min(max(first, 0.0), max(wall, 1e-6)) if first is not None else None
+        first = min(max(first, 1e-6), max(wall, 1e-6)) if first is not None else None
         prompt_ms, decode_ms = timings.get("prompt_ms"), timings.get("predicted_ms") or timings.get("decode_ms")
         if first is not None and prompt_ms:
             s = span("strata.prefill", max(0.0, first - prompt_ms / 1000), first, 1, _attrs([
