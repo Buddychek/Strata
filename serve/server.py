@@ -2020,7 +2020,7 @@ class Vision:
         (stb_image) ignores the tag.  False without Pillow, or when the tag is missing, 1 or unreadable (#1229)."""
         try:
             import io
-            from PIL import Image
+            from PIL import Image  # pyright: ignore[reportMissingImports] - Pillow is optional: without it the tag is not read (#1229)
             with Image.open(io.BytesIO(data)) as im:
                 return im.getexif().get(0x0112, 1) not in (None, 0, 1)
         except Exception:  # noqa: BLE001 - any failure leaves the image as it was sent
@@ -2036,14 +2036,14 @@ class Vision:
             return data
         try:
             import io
-            from PIL import Image
+            from PIL import Image  # pyright: ignore[reportMissingImports] - Pillow is an optional install (requirements.txt)
         except ImportError:
             raise ValueError("this image format needs Pillow (python -m pip install pillow); JPEG, PNG, BMP and "
                              "GIF work without it") from None
         try:
             im = Image.open(io.BytesIO(data))
             im.load()
-            from PIL import ImageOps
+            from PIL import ImageOps  # pyright: ignore[reportMissingImports] - the same optional Pillow
             im = ImageOps.exif_transpose(im)             # the camera's orientation tag, applied (#1229)
         except Exception as e:
             raise ValueError(f"the image could not be read ({e})") from None
@@ -3152,7 +3152,8 @@ class Service:
         if par:                                         # #465: the requests running together, slot by slot
             with self.status_lock:
                 running = len(self.live_reqs)
-            slots = self.engine.slots_view() if hasattr(self.engine, "slots_view") else []
+            view = getattr(self.engine, "slots_view", None)
+            slots = view() if callable(view) else []
             # the requests in flight that are not in a slot: the one alone on the solo path, or waiting their turn
             in_slots = sum(1 for x in slots if x["state"] != "idle")
             live.update(parallel=par, running=running, slots=slots, outside_slots=max(0, running - in_slots),
@@ -3696,6 +3697,7 @@ class Service:
                             budget = None
                             text = REASONING_WRAP_UP + (force or "")
                         else:
+                            assert force is not None    # opens is set only inside `if force:`: it is the forced call's opening
                             text = "\n" * (2 - (len(tail) - len(tail.rstrip("\n")))) + force
                         force = None
                         extra = self.tok.encode(text, parse_special=True)
@@ -4649,12 +4651,13 @@ def make_handler(svc: Service):
                         # kept after it ends (the conversation cache carries it on).  A front-end's context meter
                         # divides it by n_ctx; without the key it reads 0 % against Strata forever (#562).
                         in_use = int(svc.status.get("prompt_tokens") or 0)
-                    if getattr(svc.engine, "batch", 0) and hasattr(svc.engine, "slots_view"):
+                    view = getattr(svc.engine, "slots_view", None)
+                    if getattr(svc.engine, "batch", 0) and callable(view):
                         # --batch: one entry per slot (the same view /metrics has), not one for the whole engine
                         n_ctx = svc.reported_ctx()
                         slots = [{"id": s["slot"], "n_ctx": n_ctx, "is_processing": s["state"] != "idle",
                                   "n_prompt_tokens": int(s.get("prompt_tokens") or s.get("held_tokens") or 0)}
-                                 for s in svc.engine.slots_view()]
+                                 for s in view()]
                     else:
                         slots = [{"id": 0, "n_ctx": svc.reported_ctx(), "is_processing": busy,
                                   "n_prompt_tokens": in_use}]

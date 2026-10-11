@@ -5,7 +5,7 @@ import unittest
 from serve.server import Vision
 
 try:
-    from PIL import Image
+    from PIL import Image         # pyright: ignore[reportMissingImports] - Pillow is optional (the test skips)
 except ImportError:                 # Pillow is optional: the image then goes through as it was
     Image = None
 
