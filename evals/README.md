@@ -25,9 +25,14 @@ python evals/run_eval.py --base http://127.0.0.1:8095 --api-key KEY --repeats 3
 
 `--repeats N` runs every query N times and keeps the median wall time. `--timeout S` is the per-request
 limit (also the per-query time gate; a query can lower it with `"max_s"`). `--min-relevance F` is the
-keyword coverage a query needs (default 1.0 = all keywords). Exit code 0 when every query passes all
-three metrics, 1 otherwise - usable as a CI gate. The report lands in `evals/results/eval-<utc>.json`
-with one row per query (content preview, problems, timings).
+keyword coverage a query needs (default 1.0 = all keywords). `--trace` turns on the repo's opt-in tracing
+(`serve/tracing.py`) for the run: the mock run exports every query through an in-process OTLP collector and
+links each row to its server-side spans (the mock engine says no DONE line, so its traces carry the request
+span with token counts and wall time; prefill and decode spans are the real engine's milliseconds); against
+a real server each request carries a W3C `traceparent` and the row records the server's answer header, so
+rows line up with the server's traces (the server must be started with tracing on). Exit code 0 when every
+query passes all three metrics, 1 otherwise - usable as a CI gate. The report lands in
+`evals/results/eval-<utc>.json` with one row per query (content preview, problems, timings).
 
 The framework's own test (the harness end to end against the mock, same convention as the serve tests):
 

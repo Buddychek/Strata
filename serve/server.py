@@ -2634,7 +2634,7 @@ class Service:
         self.request_trace = threading.local()
         # opt-in (serve/tracing.py): OpenTelemetry spans per /v1 request, exported over OTLP; None = off, and then
         # the request path is byte-identical to the build without it
-        self.tracing = None
+        self.tracing: Tracing | None = None
         self.history = collections.deque(maxlen=500)    # the last finished requests, newest last (GET /metrics)
         # since the server started (the Monitor's totals, issue #35)
         self.totals = {"since": time.time(), "requests": 0, "prompt_tokens": 0, "reused": 0, "output_tokens": 0,
