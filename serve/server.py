@@ -48,7 +48,7 @@ import uuid
 from http.client import HTTPException
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Generator, Iterator, Protocol
+from typing import Any, Generator, Iterator, Protocol, TextIO
 from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -610,7 +610,8 @@ class StrataEngine:
         self.model_path = paths.get("--native") or paths.get("--pack", "pack/full")
         self.log_path = log
         self.proc: subprocess.Popen | None = None
-        self.pump, self.log = None, None
+        self.pump: Any = None            # the reader thread over the engine's stdout (a test hands in a stand-in)
+        self.log: TextIO | int | None = None   # our handle on the engine's log: a text stream, DEVNULL, or not open yet
         self.ended, self.unloaded = True, True
         self.max_context = int(args[args.index("--max-context") + 1]) if "--max-context" in args else 4096
         self.can_stop = False            # the engine honours a STOP line mid-request (READY <ctx> stop)

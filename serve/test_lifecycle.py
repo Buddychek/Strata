@@ -13,6 +13,7 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from serve.frontend import ChatTemplate
@@ -33,7 +34,7 @@ class ResidentEngine(StrataEngine):
     def exit_code(self):
         return None
 
-    def restart(self):
+    def restart(self, tries: int = 3):
         self.loaded = True
         self.starts += 1
         self.unloaded = False
@@ -235,7 +236,7 @@ class Lifecycle(unittest.TestCase):
         self.httpd.shutdown()
         self.httpd.server_close()
 
-    def request(self, path, body=None, headers=None):
+    def request(self, path, body=None, headers=None) -> tuple[Any, Any]:
         req = urllib.request.Request(self.base + path, data=json.dumps(body).encode() if body is not None else None,
                                      headers={"Content-Type": "application/json", **(headers or {})})
         try:
@@ -278,7 +279,7 @@ class Lifecycle(unittest.TestCase):
 
     def test_an_engine_that_died_on_load_is_reported_as_such(self):
         # EngineDied is a RuntimeError: it keeps its own answer ("the next request restarts it")
-        def died():
+        def died(tries: int = 3):
             raise EngineDied("the engine ended while it started")
         self.engine.restart = died
         code, body = self.request("/v1/chat/completions", {"messages": [{"role": "user", "content": "Hello"}]})
@@ -293,7 +294,9 @@ class Lifecycle(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertTrue(status["loaded"])
         self.assertEqual(self.engine.starts, 1)
-        self.assertGreaterEqual(self.svc.last_request_at, before)
+        last_at = self.svc.last_request_at
+        assert last_at is not None
+        self.assertGreaterEqual(last_at, before)
         self.svc.status["queued"] = 1
         self.assertEqual(self.request("/v1/load", {})[0], 409)
         self.assertEqual(self.request("/v1/unload", {})[0], 409)

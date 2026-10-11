@@ -174,12 +174,19 @@ def evaluate(base: str, queries: list[dict], timeout: float, repeats: int,
 
 
 def start_mock_server(queries: list[dict], repeats: int):
-    """The mock engine replaying each query's mock_answer in order (the scripts run out exactly for
-    queries x repeats requests; the last one repeats, as MockEngine does)."""
-    from serve.frontend import ChatTemplate
+    """The mock engine replaying each query's mock_answer: MockEngine hands every request the next
+    script, so each answer sits `repeats` times in a row (score_query makes repeats requests per
+    query, and the last reply is the scored one; when the scripts run out, the last one repeats).
+
+    Each script starts with the think-close, as every serve test script does (serve/test_server.py):
+    the chat template opens the model's think block, so without it the whole mock answer
+    lands in reasoning_content and message.content comes back null."""
+    from serve.frontend import ChatTemplate, THINK_END
     from serve.server import ByteTokenizer, MockEngine, Service, ROOT as SERVER_ROOT, serve
     tok = ByteTokenizer()
-    scripts = [q.get("mock_answer", f"answer to {q['id']}") for _ in range(max(1, repeats)) for q in queries]
+    close = THINK_END + "\n\n"        # the template opens the think block: the script closes it first
+    scripts = [close + answer for q in queries
+               for answer in [q.get("mock_answer", f"answer to {q['id']}")] * max(1, repeats)]
     engine = MockEngine(tok, scripts, max_context=8192)
     tpl = SERVER_ROOT / "serve" / "chat_template.jinja"
     svc = Service(engine, tok, ChatTemplate(tpl if tpl.exists() else SERVER_ROOT / "serve/chat_template.jinja"))
