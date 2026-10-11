@@ -57,7 +57,7 @@ sys.path.insert(0, str(ROOT))   # run as a script (run-<model>.bat) as well as a
 from serve.frontend import (ChatTemplate, Event, OutputParser, anthropic_to_messages,  # noqa: E402
                             forced_call, images_of, literal_tags, mark_think_literals, openai_to_messages,
                             tool_choice_of, unmark_think_literals)
-from serve.mcp import McpCancelled, hub_from_config  # noqa: E402
+from serve.mcp import McpCancelled, McpHub, hub_from_config  # noqa: E402
 from serve.tracing import Tracing, endpoint_from_config  # noqa: E402
 from serve import runconfig  # noqa: E402
 from serve.winjob import contain  # noqa: E402
@@ -1950,6 +1950,7 @@ class Vision:
         encoder is killed, so the next request starts a fresh one, and the read raises RuntimeError instead of
         holding the request turn."""
         proc = self.proc
+        assert proc is not None                         # the encoder is running: proc set (alive() checks it)
         out = proc.stdout                               # stdout=subprocess.PIPE at start: never None
         assert out is not None
         got: queue.Queue = queue.Queue()
@@ -2124,6 +2125,7 @@ class Vision:
         if proc is None:
             self.stopped = True
             return
+        assert proc.stdin is not None                   # stdin=subprocess.PIPE at start: never None
         try:
             proc.stdin.write("QUIT\n")
             proc.stdin.flush()
@@ -2669,11 +2671,11 @@ class Service:
         self.codex_thread_titles = False              # #923 (opt-in): answer Codex's thread-title turns without the engine
         self.sampling_defaults = dict(sampling_defaults or {})   # the run config's `sampling` block
         self.shared = {}                              # the web app's Chat settings for every client (POST /settings)
-        self.shared_path = None                       # where they are kept between starts (next to the config)
+        self.shared_path: str | None = None           # where they are kept between starts (next to the config)
         self.fifo = threading.Lock()
-        self.slot_save_path = None                    # --slot-save-path: /slots/0?action=save|restore (off when None)
+        self.slot_save_path: str | None = None        # --slot-save-path: /slots/0?action=save|restore (off when None)
         self.embeddings = threading.local()           # the current request's image embeddings file (GENI)
-        self.api_key = ""                              # when set, /v1/* needs it (Bearer or x-api-key)
+        self.api_key: str | list[str] = ""             # when set, /v1/* needs it (Bearer or x-api-key); #1344: a list of keys
         # #458 (opt-in, the config's "effort_position": "end"): a non-default reasoning effort goes in a short system
         # turn before the answer instead of the top of the prompt, so switching it keeps the cached conversation
         self.effort_end = False
@@ -2690,6 +2692,11 @@ class Service:
         # "*" = any), and every name it answers to, which serve() works out from the address it listens on
         self.allowed_hosts: list[str] = []
         self.host_names: set[str] = set(LOOPBACK_NAMES)
+        # the Monitor's GPU readings: the card the engine runs on, every card of a layer split, and the backend
+        # ("hip": the AMD cards' readings come from sysfs); set from the config in main(), read via getattr elsewhere
+        self.gpu_index: int
+        self.gpu_indices: list[int]
+        self.backend: str | None
         self.status = {"busy": False, "queued": 0}      # GET /status: what the model is doing right now
         self.rate = collections.deque(maxlen=32)        # (time, generated) samples for the live tok/s window
         # "parallel" (the engine's batch slots): every running request's own status and rate window; self.status
@@ -2702,7 +2709,7 @@ class Service:
         self.request_trace = threading.local()
         # opt-in (serve/tracing.py): OpenTelemetry spans per /v1 request, exported over OTLP; None = off, and then
         # the request path is byte-identical to the build without it
-        self.tracing = None
+        self.tracing: Tracing | None = None
         self.history = collections.deque(maxlen=500)    # the last finished requests, newest last (GET /metrics)
         # since the server started (the Monitor's totals, issue #35)
         self.totals = {"since": time.time(), "requests": 0, "prompt_tokens": 0, "reused": 0, "output_tokens": 0,
@@ -2714,15 +2721,15 @@ class Service:
         self.last_request_at = None                      # when a request last started or finished
         self.started_at = time.time()
         self.status_lock = threading.Lock()
-        self.mcp = None                                  # serve/mcp.py's McpHub when MCP servers are configured
+        self.mcp: McpHub | None = None                   # serve/mcp.py's McpHub when MCP servers are configured
         # sharing the GPU with other programs (all off by default): unload the engine after this many idle seconds,
         # only start it again when this much VRAM is free, and run this command first (e.g. to unload another
         # server's model); the next request after an unload starts the engine again
-        self.idle_unload_s = 0
+        self.idle_unload_s: float = 0
         self.min_free_vram_mib = 0
         self.before_load = None
         self.vram_reserve = None                         # #533: the last POST /v1/vram reserve (None: the start's)
-        self.reasoning_loop_recovery = False
+        self.reasoning_loop_recovery: bool | str = False  # #728: false | "stop" | "recover" (true -> "recover")
         self.reasoning_budget_tokens = 0                 # #123: the config's default thinking budget (0: none)
         self.repeat_stop_tokens = REPEAT_STOP_TOKENS     # #606: one token this many times in a row ends a reply (0: off)
         self.anthropic_think_unasked = True               # #278: "anthropic_thinking": "on_request" -> False
@@ -2731,11 +2738,13 @@ class Service:
                             tokenizer.encode("<|endoftext|>", parse_special=True))
 
     def loaded(self) -> bool:
-        return not hasattr(self.engine, "alive") or self.engine.alive()
+        engine: Any = self.engine
+        return not hasattr(engine, "alive") or engine.alive()
 
     def slot_action(self, slot: str, action: str, filename) -> tuple[int, dict]:
         """llama-server's POST /slots/{id}?action=save|restore {"filename": ...}: the conversation the engine holds,
         to or from a file in slot_save_path.  -> (HTTP status, body)."""
+        engine: Any = self.engine
         def error(code, message):
             return code, {"error": {"code": code, "message": message,
                                     "type": "invalid_request_error" if code < 500 else "server_error"}}
@@ -2774,7 +2783,7 @@ class Service:
                                        else "restoring a session", started=time.time(), first_token=None,
                                        prompt_tokens=None, generated=None, max_tokens=None)
                 try:
-                    r = self.engine.session_file(action, path)
+                    r = engine.session_file(action, path)
                 except SessionRefused as e:
                     body = error(e.status, str(e))
                     body[1]["error"]["kind"] = e.kind
@@ -2854,6 +2863,7 @@ class Service:
             nv = _Nvml(int(getattr(self, "gpu_index", 0) or 0))
             if not nv.ok():
                 return None
+            assert nv.lib is not None                   # ok() True: the loaded library is there
             m = nv.Mem()
             if nv.lib.nvmlDeviceGetMemoryInfo(nv.dev, ctypes.byref(m)) != 0:
                 return None
@@ -5055,11 +5065,14 @@ def make_handler(svc: Service):
             max_req = max_new = int(req.get("max_completion_tokens") or req.get("max_tokens") or 0)   # 0/-1: the rest
             use_mcp = req.get("strata_mcp") is True and svc.mcp is not None      # the web app's opt-in (serve/mcp.py)
             own = {t.get("name") for t in tools or [] if isinstance(t, dict)}   # #592: a second line of defence
+            extra: list[dict] = []
             if use_mcp:
+                hub = svc.mcp
+                assert hub is not None                            # use_mcp above already implies it
                 if not self._own_page("MCP tools can be used"):   # tools run with the user's rights on this PC
                     return
-                svc.mcp.wait(10)                                  # servers still starting (only right after start)
-                extra = svc.mcp.template_tools(exclude=own)       # the request's own tools win a name clash
+                hub.wait(10)                                    # servers still starting (only right after start)
+                extra = hub.template_tools(exclude=own)           # the request's own tools win a name clash
                 use_mcp = bool(extra)
                 tools = (tools or []) + extra or None
             if force and use_mcp:
@@ -5255,7 +5268,8 @@ def make_handler(svc: Service):
             if svc.codex_compaction_cache:
                 responses_api.prompt_made(req, shown)
             _debug_req("responses", req, messages, tools, max_new, thinking, len(ids))
-            include = req.get("include") if isinstance(req.get("include"), list) else []
+            include_req = req.get("include")
+            include = include_req if isinstance(include_req, list) else []
             asm = responses_api.Assembler(req, svc.model_for(req), len(ids), names,
                                           "reasoning.encrypted_content" in include, validator is not None)
             # the request is also the sampling dict, as on the chat path (temperature, top_p, top_k, seed, ...)
@@ -5315,6 +5329,7 @@ def make_handler(svc: Service):
 
 
 class Server(ThreadingHTTPServer):
+    svc: Service                       # the service serve() started this server for (server_close stops its telemetry)
     # On Windows SO_REUSEADDR lets a second server bind a port that is already serving, and requests then land on
     # either one (a forgotten second start of run-<model>.bat).  Without it the second start fails loudly instead.
     allow_reuse_address = os.name != "nt"
@@ -5412,20 +5427,21 @@ def desktop_vram_note(backend, vram_free_mib, args: list, desktop: bool) -> str:
 def lan_addresses() -> list[str]:
     """This PC's IPv4 addresses on its networks (what another device types in), without loopback/link-local."""
     import socket
-    first, ips = None, set()
+    first: str | None = None
+    ips: set[str] = set()
     try:                                                # the address of the default route; sends nothing (UDP)
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.connect(("10.255.255.255", 1))
-            first = s.getsockname()[0]
+            first = str(s.getsockname()[0])
     except OSError:
         pass
     try:
         for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-            ips.add(info[4][0])
+            ips.add(str(info[4][0]))
     except OSError:
         pass
     ok = lambda ip: ip and not ip.startswith(("127.", "169.254.", "0."))
-    return ([first] if ok(first) else []) + sorted(ip for ip in ips if ok(ip) and ip != first)
+    return ([first] if first and ok(first) else []) + sorted(ip for ip in ips if ok(ip) and ip != first)
 
 
 def host_name(value) -> str:
@@ -5485,7 +5501,7 @@ def host_names_for(bind_host: str, allowed_hosts=(), trusted_origins=()) -> set[
     """Every name this server answers to besides an IP address: localhost, the address it listens on, the config's
     allowed_hosts and trusted_origins' hosts, and - listening beyond this PC (0.0.0.0 or a LAN address) - this PC's
     name and LAN addresses (the LAN addresses matter for the Origin check, which takes no IP on trust)."""
-    names = set(LOOPBACK_NAMES)
+    names: set[str] = set(LOOPBACK_NAMES)
     bind = host_name(bind_host)
     if bind and bind not in ("0.0.0.0", "::"):
         names.add(bind)
@@ -5774,7 +5790,7 @@ def main() -> int:
     if a.engine == "strata" and not (tpath / "vocab.json").exists():
         ap.error(f"the model's tokenizer is missing ({tpath / 'vocab.json'}); run setup again")
     if (tpath / "vocab.json").exists():
-        import strata_tokenizer as ST
+        import strata_tokenizer as ST  # pyright: ignore[reportMissingImports] - tools/strata_tokenizer.py, on sys.path at runtime
         vocab = json.loads((tpath / "vocab.json").read_text(encoding="utf-8"))
         tokens = [None] * len(vocab)
         for t, i in vocab.items():
@@ -5901,10 +5917,10 @@ def main() -> int:
     # to the config's "cwd" (the engine's folder) when it has one.  Either way the engine gets an absolute path.
     if a.slot_save_path or cfg.get("slot_save_path"):
         try:
-            svc.slot_save_path = slot_save_dir(a.slot_save_path) if a.slot_save_path else \
-                slot_save_dir(cfg["slot_save_path"], cfg.get("cwd"))
+            slot_dir = slot_save_dir(a.slot_save_path) if a.slot_save_path else slot_save_dir(cfg["slot_save_path"], cfg.get("cwd"))
         except (ValueError, OSError) as e:
             raise SystemExit(f"[strata] {e}")
+        svc.slot_save_path = slot_dir
         print(f"[strata] slot save/restore on: {svc.slot_save_path} (session files are kept until deleted: "
               "about 1.2 GB per 63K-token conversation; restore only files this server wrote)", flush=True)
     mode = str(cfg.get("anthropic_thinking") or "model")   # #278: "on_request" = only when the request asks
@@ -5942,9 +5958,10 @@ def main() -> int:
     if a.config:
         svc.config_path = a.config                      # #564: the web page's Settings view
     if a.config:                                        # the Chat settings shared with other apps, from last time
-        svc.shared_path = str(Path(a.config).with_suffix("")) + ".shared-settings.json"
+        shared_path = str(Path(a.config).with_suffix("")) + ".shared-settings.json"
+        svc.shared_path = shared_path
         try:
-            svc.shared = clean_shared_defaults(json.loads(Path(svc.shared_path).read_text(encoding="utf-8")))
+            svc.shared = clean_shared_defaults(json.loads(Path(shared_path).read_text(encoding="utf-8")))
             if svc.shared:
                 print("[strata] other apps use the Chat settings: " +
                       ", ".join(f"{k}={v}" for k, v in svc.shared.items()), flush=True)
@@ -6002,8 +6019,9 @@ def main() -> int:
             try:
                 close()
             except KeyboardInterrupt:                   # a second Ctrl+C: don't wait for the engine to free its memory
-                if getattr(engine, "proc", None):
-                    engine.proc.kill()
+                engine_proc = getattr(engine, "proc", None)
+                if engine_proc:
+                    engine_proc.kill()
         print("[strata] stopped", flush=True)
     return 0
 
