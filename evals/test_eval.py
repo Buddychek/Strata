@@ -100,6 +100,21 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(report["summary"]["failed"], 1)
         self.assertEqual(report["rows"][0]["relevance"], 0.0)
 
+    def test_min_relevance_is_the_keyword_gate(self):
+        # half the keywords covered: fails at the default 1.0, passes when the gate is lowered to 0.5
+        queries = [{"id": "two-planets", "prompt": "Name two planets.",
+                    "expect_all": ["Mars", "Venus"], "mock_answer": "Mars is a planet."}]
+        for gate, failed in ((1.0, 1), (0.5, 0)):
+            httpd, base = run_eval.start_mock_server(queries, repeats=1)
+            try:
+                report = run_eval.evaluate(base, queries, timeout=60, repeats=1, min_relevance=gate)
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+            self.assertEqual(report["rows"][0]["relevance"], 0.5)
+            self.assertEqual(report["summary"]["failed"], failed,
+                             f"gate {gate}: {report['rows'][0]}")
+
 
 if __name__ == "__main__":
     unittest.main()

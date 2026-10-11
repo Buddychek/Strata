@@ -13,13 +13,13 @@ Three metrics per test query, measured over the real HTTP API (`/v1/chat/complet
 
 Against the mock engine - no GPU, no model, no downloads (the repo's test convention):
 
-```
+```console
 python evals/run_eval.py
 ```
 
 Against a running server (the real model, started by `START-HERE.bat` / `setup.sh`):
 
-```
+```console
 python evals/run_eval.py --base http://127.0.0.1:8095 --api-key KEY --repeats 3
 ```
 
@@ -31,7 +31,7 @@ with one row per query (content preview, problems, timings).
 
 The framework's own test (the harness end to end against the mock, same convention as the serve tests):
 
-```
+```console
 python -m unittest evals.test_eval
 ```
 

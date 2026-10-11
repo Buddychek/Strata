@@ -113,8 +113,11 @@ def relevance(text: str, q: dict) -> float:
     return 1.0 if total == 0 else matched / total
 
 
-def score_query(base: str, q: dict, timeout: float, repeats: int, api_key: str) -> dict:
-    """Run one query `repeats` times; the first reply is scored for format/relevance, the median wall time is kept."""
+def score_query(base: str, q: dict, timeout: float, repeats: int, api_key: str,
+                min_relevance: float = 1.0) -> dict:
+    """Run one query `repeats` times; the first reply is scored for format/relevance, the median wall
+    time is kept. The keyword gate is `min_relevance`: the reply must cover at least that share of the
+    query's expected keywords (1.0 = every one)."""
     walls, tok_s, reply, error = [], None, None, None
     for _ in range(max(1, repeats)):
         body = {"model": "eval", "messages": [{"role": "user", "content": q["prompt"]}],
@@ -141,9 +144,7 @@ def score_query(base: str, q: dict, timeout: float, repeats: int, api_key: str) 
     limit = q.get("max_s", timeout)
     row = {"id": q["id"], "wall_s": round(wall, 4), "tok_s": round(tok_s, 1) if tok_s else None,
            "relevance": round(rel, 3), "format_ok": not problems, "problems": problems,
-           "content": content[:200], "pass": not problems and rel >= 1.0 - 1e-9 and wall <= limit}
-    if problems or rel < 1.0 - 1e-9:
-        row["pass"] = not problems and rel >= 1.0 - 1e-9 and wall <= limit
+           "content": content[:200], "pass": not problems and rel >= min_relevance - 1e-9 and wall <= limit}
     return row
 
 
@@ -151,9 +152,7 @@ def evaluate(base: str, queries: list[dict], timeout: float, repeats: int,
              min_relevance: float, api_key: str = "") -> dict:
     rows = []
     for q in queries:
-        row = score_query(base, q, timeout, repeats, api_key)
-        row["pass"] = row["pass"] and row["relevance"] >= min_relevance
-        rows.append(row)
+        rows.append(score_query(base, q, timeout, repeats, api_key, min_relevance))
     walls = [r["wall_s"] for r in rows if r["wall_s"] is not None]
     passed = sum(1 for r in rows if r["pass"])
     return {
