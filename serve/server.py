@@ -1501,9 +1501,11 @@ class StrataEngine:
         # an image request takes the same sampling keys as text (#75: it used to decode greedily whatever was asked)
         head = f"GENI {int(max_new)}{self.sampling_keys(sampling or {})} {embeddings}" if embeddings else \
             f"GEN {int(max_new)}{self.sampling_keys(sampling or {})}"
+        stdin = self.proc.stdin                     # stdin=subprocess.PIPE at start: never None
+        assert stdin is not None
         try:
-            self.proc.stdin.write(f"{head} {','.join(str(int(t)) for t in ids)}\n")
-            self.proc.stdin.flush()
+            stdin.write(f"{head} {','.join(str(int(t)) for t in ids)}\n")
+            stdin.flush()
         except OSError:                                  # the pipe is gone: the engine died (not the client)
             raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})") from None
         done = False
@@ -1581,9 +1583,11 @@ class StrataEngine:
         finally:
             if not done:                                  # the consumer stopped early: stop the engine, drain to DONE
                 if self.can_stop:
+                    stdin = self.proc.stdin                 # stdin=subprocess.PIPE at start: never None
+                    assert stdin is not None
                     try:
-                        self.proc.stdin.write("STOP\n")
-                        self.proc.stdin.flush()
+                        stdin.write("STOP\n")
+                        stdin.flush()
                     except OSError:
                         pass
                 # #481: never an untimed wait here - it holds the request FIFO, and an engine that lost step never
