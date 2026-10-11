@@ -911,10 +911,13 @@ class StrataEngine:
         expert cache until that much VRAM is free, or grows it back when more is free; None: back to the reserve it
         started with.  -> the engine's figures (expert_slots, expert_cache_mib, vram_free_mib, ...); raises ValueError
         with the engine's reason (e.g. it was not started with --vram-elastic), EngineDied when it ended."""
-        if not self.alive():
+        proc = self.proc                            # read once: restart() / close() may set it to None meanwhile
+        if not self.alive() or proc is None:
             raise EngineDied("the engine is not running")
-        self.proc.stdin.write("VRAM" + ("" if reserve_mib is None else f" {int(reserve_mib)}") + "\n")
-        self.proc.stdin.flush()
+        stdin = proc.stdin                          # stdin=subprocess.PIPE at start: never None
+        assert stdin is not None
+        stdin.write("VRAM" + ("" if reserve_mib is None else f" {int(reserve_mib)}") + "\n")
+        stdin.flush()
         deadline = time.time() + timeout
         while True:
             try:
@@ -959,11 +962,11 @@ class StrataEngine:
         pf_on = isinstance(pf, (int, float)) and float(pf) != 0.0
         pp = sampling.get("presence_penalty")
         pp_on = isinstance(pp, (int, float)) and float(pp) != 0.0
-        if rp_on:
+        if rp_on and isinstance(rp, (int, float)):
             keys += f" penalty_repeat={float(rp)!r}"
-        if pf_on:
+        if pf_on and isinstance(pf, (int, float)):
             keys += f" penalty_freq={float(pf)!r}"
-        if pp_on:
+        if pp_on and isinstance(pp, (int, float)):
             keys += f" penalty_present={float(pp)!r}"
         if rp_on or pf_on or pp_on:
             # a penalty without a window counts over nothing: the engine's default is the last 64 tokens
@@ -1648,11 +1651,12 @@ class StrataEngine:
                             "\"engine_silence_s\" in the config, 0 = wait forever). If it happens again, please add "
                             "the end of the engine log to github.com/Niko1221/Strata/issues/481.")
         self.ended = True                               # not alive from now: the next request restarts it
-        proc = self.proc
+        proc = self.proc                                # read once: a restart may set it to None meanwhile
         try:
-            proc.kill()
-            proc.wait(timeout=20)                       # restart() -> close() handles one that is still exiting
-        except (OSError, AttributeError, subprocess.TimeoutExpired):
+            if proc is not None:                        # a lazy engine (or a failed start) has no process: nothing to end
+                proc.kill()
+                proc.wait(timeout=20)                   # restart() -> close() handles one that is still exiting
+        except (OSError, subprocess.TimeoutExpired):
             pass
         return EngineSilent(f"{what}; the server ended the engine")
 
@@ -1670,9 +1674,13 @@ class StrataEngine:
         that never ends is still ended."""
         if action not in ("save", "restore") or any(c in path for c in "\r\n\0"):
             raise ValueError("invalid session command")
+        proc = self.proc                            # read once: restart() / close() may set it to None meanwhile
+        stdin = proc.stdin if proc is not None else None
+        if stdin is None:                           # stdin=subprocess.PIPE at start: only None once the engine is gone
+            raise EngineDied("the engine is not running")
         try:
-            self.proc.stdin.write(f"{'SAVE' if action == 'save' else 'RESTORE'} {path}\n")
-            self.proc.stdin.flush()
+            stdin.write(f"{'SAVE' if action == 'save' else 'RESTORE'} {path}\n")
+            stdin.flush()
         except OSError:
             raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})") from None
         silence = float(self.silence_s or 0)
@@ -1681,10 +1689,12 @@ class StrataEngine:
 
         def out_of_step(line: str) -> EngineDied:
             self.ended = True                               # not alive from now: the next request restarts it
+            proc = self.proc                                # read once: a restart may set it to None meanwhile
             try:
-                self.proc.kill()
-                self.proc.wait(timeout=20)
-            except (OSError, AttributeError, subprocess.TimeoutExpired):
+                if proc is not None:
+                    proc.kill()
+                    proc.wait(timeout=20)
+            except (OSError, subprocess.TimeoutExpired):
                 pass
             return EngineDied(f"the engine answered a session {action} with {line.strip()[:200]!r}; "
                               "the server ended the engine")
@@ -1769,23 +1779,26 @@ class StrataEngine:
     def close(self):
         """End the engine process: QUIT first (the engine frees its memory itself - unpinning tens of GB can take
         a while), then terminate, then kill, each given 20 s.  Raises EngineStuck when it still runs after all three."""
-        if self.proc is None:
+        proc = self.proc
+        if proc is None:
             self._close_log()
             return
+        stdin = proc.stdin                            # stdin=subprocess.PIPE at start: never None
+        assert stdin is not None
         try:
-            if self.proc.poll() is None:
+            if proc.poll() is None:
                 try:
-                    self.proc.stdin.write("QUIT\n")
-                    self.proc.stdin.flush()
-                    self.proc.stdin.close()  # Windows' detached stdin reader must see EOF before shutdown
-                    self.proc.wait(timeout=20)
+                    stdin.write("QUIT\n")
+                    stdin.flush()
+                    stdin.close()  # Windows' detached stdin reader must see EOF before shutdown
+                    proc.wait(timeout=20)
                 except (OSError, ValueError, subprocess.TimeoutExpired):
-                    self.proc.terminate()
-                    self.proc.wait(timeout=20)
+                    proc.terminate()
+                    proc.wait(timeout=20)
         except subprocess.TimeoutExpired:
-            self.proc.kill()
+            proc.kill()
             try:
-                self.proc.wait(timeout=20)
+                proc.wait(timeout=20)
             except subprocess.TimeoutExpired:
                 raise EngineStuck("Strata is still releasing GPU/RAM; retry unloading after it exits") from None
         except OSError:
@@ -1794,14 +1807,16 @@ class StrataEngine:
             self._close_log()                           # ours, not the engine's copy: closing it never stops the
             #                                         engine's lines, and a process that cannot be ended must not
             #                                         keep the log held for the whole session
-            if self.proc.poll() is not None:
+            if proc.poll() is not None:
                 if self.pump is not None and self.pump.ident is not None:   # a restart can stop before starting it
                     self.pump.join(timeout=2)
                 try:
-                    self.proc.stdin.close()             # buffered data may flush again after the engine has exited
+                    stdin.close()                       # buffered data may flush again after the engine has exited
                 except OSError:
                     pass
-                self.proc.stdout.close()
+                out = proc.stdout                       # stdout=subprocess.PIPE at start: never None
+                assert out is not None
+                out.close()
                 self.proc = None
                 self.ended = True
                 self.progress, self.last = None, {}
@@ -1912,9 +1927,11 @@ class Vision:
             raise RuntimeError(vision_start_error(line, self.spawn[1]))
         self.stopped = False
 
-    def _readline(self, timeout: float, what: str) -> str:
-        """One line from the encoder, waiting at most `timeout` s (#1317).  On a timeout the encoder is killed, so the
-        next request starts a fresh one, and the read raises RuntimeError instead of holding the request turn."""
+    def _readline(self, timeout: float | None, what: str) -> str:
+        """One line from the encoder, waiting at most `timeout` s (#1317); None - what a 0 override of
+        STRATA_VISION_READY_S / STRATA_VISION_ENCODE_S gives - waits for ever, as before that fix.  On a timeout the
+        encoder is killed, so the next request starts a fresh one, and the read raises RuntimeError instead of
+        holding the request turn."""
         proc = self.proc
         got: queue.Queue = queue.Queue()
 
@@ -1927,12 +1944,12 @@ class Vision:
         threading.Thread(target=read, daemon=True).start()
         try:
             return got.get(timeout=timeout)
-        except queue.Empty:
+        except queue.Empty:                             # never with timeout None: the read waits for ever
             try:
                 proc.kill()
             except OSError:
                 pass
-            raise RuntimeError(f"{what}: it said nothing for {timeout:.0f} s") from None
+            raise RuntimeError(f"{what}: it said nothing for {timeout or 0.0:.0f} s") from None
 
     def alive(self) -> bool:
         return self.proc is not None and not self.stopped and self.proc.poll() is None
@@ -2055,11 +2072,15 @@ class Vision:
             if key in self.cache:
                 self.cache[key] = self.cache.pop(key)                  # most recently used last
                 return self.cache[key]
+            proc = self.proc
+            stdin = proc.stdin if proc is not None else None
+            if stdin is None:                       # stdin=subprocess.PIPE at start: only None once the encoder is gone
+                raise ValueError("the image encoder is not running (the vision encoder stopped)")
             img, out = self.dir / f"{key}.img", self.dir / f"{key}.sve"
             img.write_bytes(data)
             try:
-                self.proc.stdin.write(f"ENC {img.name} {out.name}\n")      # relative to the encoder's cwd (#480)
-                self.proc.stdin.flush()
+                stdin.write(f"ENC {img.name} {out.name}\n")      # relative to the encoder's cwd (#480)
+                stdin.flush()
                 try:
                     line = self._readline(VISION_ENCODE_S, "the image could not be read").strip()
                 except RuntimeError as e:                 # silent for VISION_ENCODE_S: the encoder was ended (#1317)
@@ -2905,7 +2926,8 @@ class Service:
 
     def _say_died(self, e: Exception) -> None:
         """The server window's line for an engine that died (or was ended, #481) in the middle of a request."""
-        note = self.engine.death_note() if hasattr(self.engine, "death_note") else ""
+        death = getattr(self.engine, "death_note", None)
+        note = death() if callable(death) else ""
         log = getattr(self.engine, "log_path", None)
         print(f"[strata] {e}. {note} The next request starts the engine again."
               f"{' Its log: ' + log if log else ''}", flush=True)
@@ -3875,7 +3897,8 @@ def run_with_mcp(svc: Service, hub, messages, tools, kw, ids, thinking, max_new,
     turn as always (the client answers it).  MCP calls written in the same answer are then not run (their results
     could not reach the model before the client's)."""
     max_rounds = int(hub.settings["max_rounds"])
-    total, rounds, done = 0, 0, None
+    total, rounds = 0, 0
+    done: dict | None = None              # the last Service.run ("done", ...) item; the MCP loop rewrites its finish
     messages = list(messages)
     while True:
         text, reasoning, calls, own_calls = [], [], [], 0
@@ -3898,6 +3921,7 @@ def run_with_mcp(svc: Service, hub, messages, tools, kw, ids, thinking, max_new,
                 elif ev.kind == "reasoning":
                     reasoning.append(ev.text)
             yield kind, x
+        assert done is not None                 # Service.run always ends with its ("done", ...) item
         total += done["completion_tokens"]
         run_them = calls and not own_calls and done["finish"] == "stop" and not cancel.is_set()
         if run_them and rounds >= max_rounds:
@@ -4012,20 +4036,24 @@ def openai_chunks(svc: Service, req: dict, ids, thinking, tools, max_new, cancel
                 yield chunk({"reasoning_content": ev.text})
             elif ev.kind == "content" and ev.text:
                 yield chunk({"content": ev.text})
-            elif ev.kind == "tool_start":
-                streamed[ev.call.id] = calls
-                calls += 1
-                yield chunk({"tool_calls": [{"index": streamed[ev.call.id], "id": ev.call.id, "type": "function",
-                                             "function": {"name": ev.call.name, "arguments": ""}}]})
-            elif ev.kind == "tool_args":
-                yield chunk({"tool_calls": [{"index": streamed[ev.call.id], "function": {"arguments": ev.text}}]})
-            elif ev.kind == "tool_call" and ev.call.id in streamed:
-                finished.add(ev.call.id)
-            elif ev.kind == "tool_call":
-                yield chunk({"tool_calls": [{"index": calls, "id": ev.call.id, "type": "function",
-                                             "function": {"name": ev.call.name,
-                                                          "arguments": json.dumps(ev.call.arguments, ensure_ascii=False)}}]})
-                calls += 1
+            # A tool event carries its ToolCall; binding it once and checking it for None narrows it for every
+            # access below (a text event has no call: it is not a tool kind, so its branch is never entered).
+            elif ev.kind in ("tool_start", "tool_args", "tool_call") and (call := ev.call) is not None:
+                if ev.kind == "tool_start":
+                    streamed[call.id] = calls
+                    calls += 1
+                    yield chunk({"tool_calls": [{"index": streamed[call.id], "id": call.id, "type": "function",
+                                                 "function": {"name": call.name, "arguments": ""}}]})
+                elif ev.kind == "tool_args":
+                    yield chunk({"tool_calls": [{"index": streamed[call.id], "function": {"arguments": ev.text}}]})
+                elif call.id in streamed:
+                    finished.add(call.id)
+                else:
+                    yield chunk({"tool_calls": [{"index": calls, "id": call.id, "type": "function",
+                                                 "function": {"name": call.name,
+                                                              "arguments": json.dumps(call.arguments,
+                                                                                       ensure_ascii=False)}}]})
+                    calls += 1
         else:
             # a streamed call without its final tool_call is one the output ended inside: not "tool_calls" (#211)
             whole = calls and streamed.keys() <= finished
@@ -4182,7 +4210,8 @@ def anthropic_events(svc: Service, req: dict, ids, thinking, tools, max_new, can
 
 
 def anthropic_collect(events) -> dict:
-    msg, blocks = None, []
+    msg: dict | None = None
+    blocks: list = []
     for item in events:
         if item is None:                           # a heartbeat
             continue
@@ -4209,6 +4238,7 @@ def anthropic_collect(events) -> dict:
             msg["stop_reason"] = e["delta"]["stop_reason"]
             msg["stop_sequence"] = e["delta"].get("stop_sequence")
             msg["usage"].update(e["usage"])
+    assert msg is not None            # a stream always begins with a message_start
     msg["content"] = blocks
     return msg
 
@@ -4951,6 +4981,7 @@ def make_handler(svc: Service):
             return self._captured(items, api)
 
         def _captured(self, items, api):
+            assert self.record is not None           # _capture() only calls this when a record was kept
             keep_text = "output" in self.record      # tracing without the monitor: counts and timings only, no text
             try:
                 for item in items:
@@ -5086,7 +5117,7 @@ def make_handler(svc: Service):
 
             def events():
                 yield from asm.start()
-                done = None
+                done: dict | None = None          # Service.run's ("done", ...) item; asm.finish takes the dict
                 for kind, x in svc.run(ids, thinking, tools, max_new, req, cancel):
                     if kind == "ping":
                         yield None

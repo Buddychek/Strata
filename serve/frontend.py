@@ -245,7 +245,8 @@ def _has_tag(v, tags: dict[str, str] = LITERAL_TAGS) -> bool:
     return False
 
 
-def mark_think_literals(messages: list[dict], tools: list[dict] | None, tags: dict[str, str] = LITERAL_TAGS):
+def mark_think_literals(messages: list[dict], tools: list[dict] | None,
+                        tags: dict[str, str] = LITERAL_TAGS) -> tuple[list[dict], list[dict] | None, bool]:
     """#537: (messages, tools) with every literal <think> / </think> (#554: and vision marker) in their text swapped for
     LITERAL_TAGS' marks (or `tags`': literal_tags() adds the control tokens' texts), and
     whether there was one (None: no change, the same objects back - a prompt without them renders as it always did).
