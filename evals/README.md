@@ -45,7 +45,7 @@ python -m unittest evals.test_eval
 | `prompt` | the user message |
 | `expect_all` | keywords the reply must contain (all) |
 | `expect_any` | keywords of which the reply must contain at least one |
-| `mock_answer` | what the mock engine replays for this query (so the mock run checks the server's plumbing: API shape, token counts, timings, streaming) |
+| `mock_answer` | what the mock engine replays for this query (so the mock run checks the server's plumbing: request handling, the OpenAI shape, token counts, latency bookkeeping) |
 | `max_tokens` | optional output cap (default 256) |
 | `max_s` | optional per-query time limit (default: `--timeout`) |
 

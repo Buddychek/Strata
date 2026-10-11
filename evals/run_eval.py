@@ -20,7 +20,7 @@ Exit code 0 when every query passes all three, 1 otherwise - usable as a CI gate
 evals/results/eval-<utc>.json with one row per query.
 
 The mock answers in queries.jsonl are what the mock engine replays, so the mock run checks the server's
-plumbing (API shape, streaming, token counts, timing) end to end; a real-model run checks the model's answers
+plumbing (API shape, token counts, latency) end to end; a real-model run checks the model's answers
 against the same keywords.
 """
 import argparse
@@ -115,7 +115,7 @@ def relevance(text: str, q: dict) -> float:
 
 def score_query(base: str, q: dict, timeout: float, repeats: int, api_key: str,
                 min_relevance: float = 1.0) -> dict:
-    """Run one query `repeats` times; the first reply is scored for format/relevance, the median wall
+    """Run one query `repeats` times; the last reply is scored for format/relevance, the median wall
     time is kept. The keyword gate is `min_relevance`: the reply must cover at least that share of the
     query's expected keywords (1.0 = every one)."""
     walls, tok_s, reply, error = [], None, None, None
@@ -137,6 +137,7 @@ def score_query(base: str, q: dict, timeout: float, repeats: int, api_key: str,
     if error is not None:
         return {"id": q["id"], "pass": False, "error": error, "wall_s": None, "tok_s": None,
                 "relevance": 0.0, "format_ok": False, "problems": [error], "content": None}
+    assert reply is not None
     content = ((reply.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
     problems = check_format(reply)
     rel = relevance(content, q)
