@@ -629,7 +629,8 @@ class StrataEngine:
         if lazy:
             return
         self.unloaded = False            # `ended` stays True until READY (below): not alive while starting (#344)
-        self.log = open(log, "a", encoding="utf-8") if log else subprocess.DEVNULL
+        log_handle = open(log, "a", encoding="utf-8") if log else None
+        self.log = log_handle if log_handle is not None else subprocess.DEVNULL
         loading = threading.Event()                     # set once READY: the narrator below stops
         log_start = os.path.getsize(log) if log else 0  # where this start's lines begin (start_failure_hint)
         self.log_start = log_start                      # #596: the Monitor's conversation cache reads from here
@@ -642,9 +643,10 @@ class StrataEngine:
                 threading.Thread(target=echo_requests, args=(log, os.path.getsize(log)), daemon=True).start()
         if log:                                          # #779: when an engine started (a crash report has the time)
             try:
-                self.log.write(f"[strata] {time.strftime('%Y-%m-%d %H:%M:%S')} engine started: {exe} --serve "
+                assert log_handle is not None
+                log_handle.write(f"[strata] {time.strftime('%Y-%m-%d %H:%M:%S')} engine started: {exe} --serve "
                                f"{' '.join(args)}\n")
-                self.log.flush()
+                log_handle.flush()
             except OSError:
                 pass
         self.max_context = 0                             # before the new process is visible: never its predecessor's
@@ -686,8 +688,10 @@ class StrataEngine:
                     pass
             try:                                        # its pipes; the log handle goes back below, whatever these do
                 self.proc.wait(timeout=5)
-                self.proc.stdin.close()
-                self.proc.stdout.close()
+                if self.proc.stdin is not None:         # PIPE at start: only None once the process is gone
+                    self.proc.stdin.close()
+                if self.proc.stdout is not None:
+                    self.proc.stdout.close()
             except (OSError, subprocess.TimeoutExpired):
                 pass
             self._close_log()                           # a start that failed must not keep the log open for the
@@ -874,10 +878,11 @@ class StrataEngine:
                     self.__init__(*self.spawn)
                     break
                 except RuntimeError:
-                    try:
-                        self.proc.wait(timeout=60)
-                    except (subprocess.TimeoutExpired, OSError):
-                        pass
+                    if self.proc is not None:           # __init__ sets proc before it can raise this
+                        try:
+                            self.proc.wait(timeout=60)
+                        except (subprocess.TimeoutExpired, OSError):
+                            pass
                     if i == tries - 1:
                         raise
                     print(f"[strata] the engine did not start (try {i + 1} of {tries}); again in "
@@ -1009,8 +1014,11 @@ class StrataEngine:
         btrace("send>", text[:60])
         try:
             with self.wlock:
-                self.proc.stdin.write(text + "\n")
-                self.proc.stdin.flush()
+                stdin = self.proc.stdin if self.proc is not None else None
+                if stdin is None:                     # the process is gone: the death note
+                    raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})")
+                stdin.write(text + "\n")
+                stdin.flush()
         except (OSError, AttributeError):                # the pipe is gone (or a restart's close() took the process):
             raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})") from None
 
@@ -1504,6 +1512,8 @@ class StrataEngine:
         proc = self.proc                            # read once: a restart's close() may have taken the process
         stdin = proc.stdin if proc is not None else None    # stdin=subprocess.PIPE: None only once the engine is gone
         try:
+            if stdin is None:                        # the process is gone: the death note, as the except below
+                raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})")
             stdin.write(f"{head} {','.join(str(int(t)) for t in ids)}\n")
             stdin.flush()
         except (OSError, AttributeError):                # the pipe is gone, or the process is: the engine died
@@ -1584,11 +1594,13 @@ class StrataEngine:
         finally:
             if not done:                                  # the consumer stopped early: stop the engine, drain to DONE
                 if self.can_stop:
-                    try:
-                        self.proc.stdin.write("STOP\n")     # a restart's close() may have taken the process: its EOF
-                        self.proc.stdin.flush()             # on self.lines ends the drain below
-                    except (OSError, AttributeError):
-                        pass
+                    stop_stdin = self.proc.stdin if self.proc is not None else None
+                    if stop_stdin is not None:            # a restart's close() may have taken the process: its EOF
+                        try:                            # on self.lines ends the drain below
+                            stop_stdin.write("STOP\n")
+                            stop_stdin.flush()
+                        except (OSError, AttributeError):
+                            pass
                 # #481: never an untimed wait here - it holds the request FIFO, and an engine that lost step never
                 # answers.  An engine that honours STOP gets the current allowance in all (a STOP during a prompt
                 # chunk is seen after it); an older one runs on to max_new, so each line only has to come in time.
@@ -1614,6 +1626,8 @@ class StrataEngine:
         """#1317: (CPU seconds, I/O bytes) the engine process has used so far, or None when they cannot be read."""
         try:
             import psutil
+            if self.proc is None:                     # the process gone: no reading, as the except below
+                return None
             pr = psutil.Process(self.proc.pid)
             t = pr.cpu_times()
             io = pr.io_counters()
@@ -1936,11 +1950,13 @@ class Vision:
         encoder is killed, so the next request starts a fresh one, and the read raises RuntimeError instead of
         holding the request turn."""
         proc = self.proc
+        out = proc.stdout                               # stdout=subprocess.PIPE at start: never None
+        assert out is not None
         got: queue.Queue = queue.Queue()
 
         def read():
             try:
-                got.put(proc.stdout.readline())
+                got.put(out.readline())
             except (OSError, ValueError):               # killed under the read
                 got.put("")
 
