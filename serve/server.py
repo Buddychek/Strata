@@ -3467,7 +3467,7 @@ class Service:
                   f"{el:.0f} s", flush=True)
         return now
 
-    def run(self, ids, thinking, tools, max_new, sampling, cancel, force=None) -> Iterator[tuple[str, object]]:
+    def run(self, ids, thinking, tools, max_new, sampling, cancel, force=None) -> Iterator[tuple[str, Any]]:
         """Yields ("event", Event) as text arrives, then ("done", {"finish": .., "completion_tokens": ..}).
         `force` (forced_call): the opening of the call the reply must make - see prepare()."""
         defaults = {**self.sampling_defaults, **self.shared}   # the config's, then the Chat settings shared with apps
@@ -4100,6 +4100,7 @@ def openai_collect(chunks) -> dict:
             cur["function"]["name"] += fn.get("name") or ""
             cur["function"]["arguments"] += fn.get("arguments") or ""
         last = c
+    assert last is not None         # a stream always begins with the role chunk openai_chunks yields first
     calls = [by_index[i] for i in sorted(by_index)]
     if last["choices"][0]["finish_reason"] != "tool_calls":
         calls = [c for c in calls if _is_json(c["function"]["arguments"])]   # a call the output ended inside (#211)
@@ -4165,14 +4166,16 @@ def anthropic_events(svc: Service, req: dict, ids, thinking, tools, max_new, can
                 yield "content_block_delta", {"type": "content_block_delta", "index": index,
                                               "delta": {"type": "input_json_delta", "partial_json": ev.text}}
                 continue
-            if ev.kind == "tool_call" and ev.call.id in streamed:
-                finished.add(ev.call.id)
+            # a tool event always carries its ToolCall (OutputParser builds every one with call=); binding it
+            # once and checking it for None narrows it for every access below, as in openai_chunks
+            if ev.kind == "tool_call" and (call := ev.call) is not None and call.id in streamed:
+                finished.add(call.id)
                 continue
             want = {"reasoning": "thinking", "content": "text", "tool_call": "tool_use", "tool_start": "tool_use"}[ev.kind]
             if ev.kind not in ("tool_call", "tool_start") and not ev.text:
                 continue
-            if ev.kind == "tool_start":
-                streamed.add(ev.call.id)
+            if ev.kind == "tool_start" and (call := ev.call) is not None:
+                streamed.add(call.id)
                 used_tool = True
             if open_kind != want or want == "tool_use":
                 if open_kind is not None:
@@ -4192,10 +4195,10 @@ def anthropic_events(svc: Service, req: dict, ids, thinking, tools, max_new, can
                                               "delta": {"type": "text_delta", "text": ev.text}}
             elif ev.kind == "tool_start":
                 pass                                # its input follows as tool_args pieces
-            else:
+            elif (call := ev.call) is not None:     # a tool_call event: OutputParser always gives it its call
                 used_tool = True
                 yield "content_block_delta", {"type": "content_block_delta", "index": index, "delta": {
-                    "type": "input_json_delta", "partial_json": json.dumps(ev.call.arguments, ensure_ascii=False)}}
+                    "type": "input_json_delta", "partial_json": json.dumps(call.arguments, ensure_ascii=False)}}
         else:
             if open_kind is not None:
                 yield close()
@@ -4240,6 +4243,7 @@ def anthropic_collect(events) -> dict:
             except ValueError:                     # a call the output ended inside (#211): it has no input to give
                 blocks.pop()
         elif name == "message_delta":
+            assert msg is not None            # a stream always begins with a message_start
             msg["stop_reason"] = e["delta"]["stop_reason"]
             msg["stop_sequence"] = e["delta"].get("stop_sequence")
             msg["usage"].update(e["usage"])
