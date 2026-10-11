@@ -3,9 +3,11 @@ import json
 import contextlib
 import io
 import os
+import queue
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import urllib.error
@@ -127,6 +129,31 @@ class Lifecycle(unittest.TestCase):
         self.assertEqual(engine.max_context, 16384)
         self.assertIsNone(engine.exit_code())
         engine.close()
+
+    def test_a_request_while_the_engine_is_taken_says_the_engine_is_gone(self):
+        """A restart's close() sets proc to None while a request is inside generate(): both of its stdin writes
+        must say EngineDied (the request ends with the engine-death note, and the next request starts the engine
+        again) - not the AttributeError of None.stdin, which a client would read as its own request being refused."""
+        def engine(proc):
+            e = StrataEngine("missing-executable", ["--max-context", "1024"], lazy=True)
+            e.lines, e.ended, e.can_stop = queue.Queue(), False, True
+            e.proc = proc
+            e.alive = lambda: True                    # the request's own view: alive until close() took the process
+            return e
+
+        with self.assertRaises(EngineDied):           # the GEN line: nothing was sent, so the next request restarts
+            next(engine(None).generate([1, 2], 5, {}, threading.Event()))
+
+        live = mock.Mock()
+        live.poll.side_effect = lambda: None
+        e = engine(live)
+        e.lines.put("T 5")
+        gen = e.generate([1, 2], 5, {}, threading.Event())
+        self.assertEqual(next(gen), 5)                # the request is on its way
+        e.proc, e.ended = None, True                  # close() took the process; its pump published the EOF
+        e.lines.put(None)
+        gen.close()                                   # the consumer left: no STOP to write, the drain ends at the EOF
+        self.assertNotIn("STOP\n", [c.args[0] for c in live.stdin.write.call_args_list])
 
     def fake_engine(self, d, body):
         """A fake engine script (the way test_server's fakes run it on Windows too) for the start paths below."""

@@ -1501,12 +1501,13 @@ class StrataEngine:
         # an image request takes the same sampling keys as text (#75: it used to decode greedily whatever was asked)
         head = f"GENI {int(max_new)}{self.sampling_keys(sampling or {})} {embeddings}" if embeddings else \
             f"GEN {int(max_new)}{self.sampling_keys(sampling or {})}"
-        stdin = self.proc.stdin                     # stdin=subprocess.PIPE at start: never None
-        assert stdin is not None
+        proc = self.proc                            # read once: a restart's close() may have taken the process
+        stdin = proc.stdin if proc is not None else None    # stdin=subprocess.PIPE: None only once the engine is gone
         try:
             stdin.write(f"{head} {','.join(str(int(t)) for t in ids)}\n")
             stdin.flush()
-        except OSError:                                  # the pipe is gone: the engine died (not the client)
+        except (OSError, AttributeError):                # the pipe is gone, or the process is: the engine died
+            #                                          (not the client): its request ends with the death note
             raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})") from None
         done = False
         # #481: how long the engine may stay silent from here.  Until the first line: the request's first prompt
@@ -1583,12 +1584,10 @@ class StrataEngine:
         finally:
             if not done:                                  # the consumer stopped early: stop the engine, drain to DONE
                 if self.can_stop:
-                    stdin = self.proc.stdin                 # stdin=subprocess.PIPE at start: never None
-                    assert stdin is not None
                     try:
-                        stdin.write("STOP\n")
-                        stdin.flush()
-                    except OSError:
+                        self.proc.stdin.write("STOP\n")     # a restart's close() may have taken the process: its EOF
+                        self.proc.stdin.flush()             # on self.lines ends the drain below
+                    except (OSError, AttributeError):
                         pass
                 # #481: never an untimed wait here - it holds the request FIFO, and an engine that lost step never
                 # answers.  An engine that honours STOP gets the current allowance in all (a STOP during a prompt
