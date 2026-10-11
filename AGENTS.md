@@ -21,6 +21,9 @@ offers the same steps as tools.
   `tools/test_setup_amd.py`, `tools/test_setup_choices.py`).
 - The server's own tests need no GPU, model, or downloads: `python -m unittest serve.test_<name>` from the
   repo root (for example `serve.test_server`, `serve.test_parallel`, `serve.test_tracing`).
+- The evaluation harness scores answers over the real API (format, relevance, time); the mock run needs no
+  GPU, model, or downloads: `python evals/run_eval.py` (mock) or `python -m unittest evals.test_eval`;
+  details in [evals/README.md](evals/README.md).
 - Keep the docs' style: plain words, measured numbers with what they were measured on, no claims without a
   measurement.
 
