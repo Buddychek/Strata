@@ -19,6 +19,8 @@ offers the same steps as tools.
 - AMD (HIP) build and validation: [docs/AMD_HIP.md](docs/AMD_HIP.md); multi-GPU: [docs/MULTI_GPU.md](docs/MULTI_GPU.md).
 - Setup's own tests run without a GPU or downloads: `python tools/test_setup_<name>.py` (for example
   `tools/test_setup_amd.py`, `tools/test_setup_choices.py`).
+- The server's own tests need no GPU, model, or downloads: `python -m unittest serve.test_<name>` from the
+  repo root (for example `serve.test_server`, `serve.test_parallel`, `serve.test_tracing`).
 - Keep the docs' style: plain words, measured numbers with what they were measured on, no claims without a
   measurement.
 

@@ -30,6 +30,12 @@ On a clean Windows 11, Smart App Control refuses programs that are not signed, a
 settings; it cannot be turned back on without a reset of Windows), or, if only the image encoder is blocked, run
 `START-HERE.bat --setup --vision no`.
 
+**Setup cannot move, delete, or rewrite `strata-<model>.log` after a start that failed (#779).**
+A start that never reached its ready line - Smart App Control blocking the engine, a config the engine
+refuses, a model that does not fit - used to keep the log open for the whole session, and Windows then
+refused to touch the file. That handle is given back now: run `START-HERE.bat` (Linux: `./setup.sh`)
+again and the file is free.
+
 **A new engine misbehaves after an update.**
 An update keeps the engine it replaced in `engine\.previous` (one generation, about 210 MiB).
 `python setup.py --rollback-engine` puts it back (and keeps the newer one there: run it again to go forward) (#670).
@@ -76,7 +82,9 @@ Your PC is out of free RAM. Close other programs, or pick a smaller size (Q2_0 o
 
 **An answer stopped with "the engine stopped unexpectedly".**
 Usually not enough RAM (on Linux the system then stops the engine). Just send your message again: Strata starts the
-engine by itself. If it keeps happening, close other programs or pick a smaller size.
+engine by itself. The same line on a request you sent while the server was stopping (a Ctrl+C, a closed
+window, an unload) is that stop taking the engine mid-request: it is not a fault in what you sent, and the
+next request starts it again. If it keeps happening, close other programs or pick a smaller size.
 
 **It says the prompt exceeds the context.**
 The conversation is longer than the context you chose. Start a new chat, or run `SETUP.bat` and pick more
