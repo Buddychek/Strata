@@ -28,8 +28,11 @@ time.sleep(120)
 
 
 def running(pid: int) -> bool:
-    out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True).stdout
-    return str(pid) in out
+    # bytes, not text=True: tasklist writes the OEM code page (the German "keine Aufgaben … ausgeführt" of an
+    # empty result carries a cp850 0x81), and a text decode on a UTF-8 locale kills the reader thread,
+    # leaving stdout None.  A pid is ASCII, so the byte search is the same test.
+    out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True).stdout
+    return str(pid).encode() in out
 
 
 @unittest.skipUnless(os.name == "nt", "job objects are Windows-only")
