@@ -162,6 +162,7 @@ experts from `experts.bin` into RAM (page-locked when the driver allows, else lo
 nothing is read from the SSD, however little RAM the OS leaves for its file cache. Examples with setup's context: a
 32 GB PC with a 24 GB GPU runs Q2_0, IQ2_XS and the Coder this way (~16-18 GB of experts in RAM, the GPU holds the
 other ~18 GB), a 32 GB PC with a 12-16 GB GPU the Coder; IQ3_XXS on a 32 GB PC stays mapped. The details:
+<!-- markdownlint-disable MD032 -->
 - The prompt path borrows room in the GPU's expert cache for its buffers and puts those experts back after the prompt;
   as far as the RAM allows, their experts are kept in RAM too (so a prompt reads nothing from the SSD either).
 - The cache still follows the conversation (`--adapt-every`): a swap copies the evicted expert back from VRAM into the
@@ -193,6 +194,7 @@ other ~18 GB), a 32 GB PC with a 12-16 GB GPU the Coder; IQ3_XXS on a 32 GB PC s
   pair as `--mmap-experts` with a warning instead of refusing it. **Since 0.1.40 (#642, #848)** setup requires an
   engine that runs the resident variant on a split, so it keeps both cards, resident, as for any config:
   [MULTI_GPU.md](MULTI_GPU.md#using-it).
+<!-- markdownlint-enable MD032 -->
 
 **A mapped arena for small RAM (Linux, opt-in, 0.1.39, PR #640):** `STRATA_ARENA_MMAP=1` maps a native pack's expert
 arena read-only from the pack's `experts.bin` instead of reading it into locked RAM, for a PC whose GPUs hold most
@@ -256,6 +258,7 @@ is what runs [Unsloth's UD-Q4_K_XL](UNSLOTH_Q4.md) (72 GiB of experts) on a 64 G
 RTX 5070, against ~3 tokens/s before these changes.
 
 **Switches added in 0.1.40 (all off unless noted; none changes the default output):**
+<!-- markdownlint-disable MD032 -->
 - `--kv-grow` (or `STRATA_KV_GROW=1`; `--no-kv-grow` turns it off): the K/V takes VRAM only for the cells the requests
   reach, and the expert cache holds the rest, giving slots back as the context grows. It needs one GPU, an expert
   profile, the whole K/V in VRAM (no KV streaming) and every expert in RAM (not the resident low-RAM mode); otherwise,
@@ -275,7 +278,7 @@ RTX 5070, against ~3 tokens/s before these changes.
   of your own instead of `<mtp>/draft_vocab.bin`).
 - Elsewhere: HIP `STRATA_DENSE_MMQ=1` and `STRATA_HIP_ADAPT_KERNEL_COPY=1` in [AMD_HIP.md](AMD_HIP.md#model-and-serving-configuration);
   `STRATA_KEEP_EMPTY_TURNS=1` and `STRATA_TOPK_STREAM=0` in [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
-
+<!-- markdownlint-enable MD032 -->
 
 **Read-ahead at start (Linux):** the weights, the native dense matrices, the GPU cache's fill from the profile, the
 resident RAM copy and the MTP draft files are asked for ahead of their reads (madvise / posix_fadvise WILLNEED in
@@ -463,6 +466,7 @@ START-HERE.bat --calibrate                      tune the engine for this PC (abo
 
 With more than one model installed, it asks which one to start. `run-<model>.bat` starts a model directly.
 
+<!-- markdownlint-disable MD032 -->
 **Tuning for your PC (`--calibrate`, engine 0.1.19).** Four engine settings depend on the PC more than on the model:
 - the share of the experts missing from VRAM that are copied to the GPU instead of computed by the CPU
   (`--pcie-frac`: a fast PCIe link and a slower CPU want more, a laptop's narrower link less);
@@ -472,6 +476,7 @@ With more than one model installed, it asks which one to start. `run-<model>.bat
   whose CPU reads the missed experts slowly (DDR3 or DDR4 in few channels) gains from swapping more. On a Xeon
   E5-2673 v3 with DDR3 and an RTX 4060 Ti on PCIe 3.0 x8, 160 swaps every window measured +7.9% over the default
   (Q2_0, with the swaps taking effect a window later, #764); see #906.
+<!-- markdownlint-enable MD032 -->
 
 The defaults were measured on a Ryzen 5 7600 with an RTX 5070. Setup offers to measure them on your PC after an
 install; `START-HERE.bat --calibrate` (Linux: `./setup.sh --calibrate`) does it any time. It measures the output
@@ -1479,8 +1484,10 @@ The margin is the whole trade: at 0 the router answers alone, and a large margin
 already holds, at the price of answers that are not the routing the model chose. When the engine stops it says what it
 did, once for the prompt windows (more than 8 tokens) and once for the decode windows (8 or fewer), in this shape:
 
-    route-resident: margin=<margin> ranks=<lo>-<hi> windows T>8 (prompt reads): tail_nonres=.. swaps=.. (..%) nonres_entries before=.. after=..
-    route-resident: margin=<margin> ranks=<lo>-<hi> windows T<=8 (decode): tail_nonres=.. swaps=.. (..%) nonres_entries before=.. after=..
+```text
+route-resident: margin=<margin> ranks=<lo>-<hi> windows T>8 (prompt reads): tail_nonres=.. swaps=.. (..%) nonres_entries before=.. after=..
+route-resident: margin=<margin> ranks=<lo>-<hi> windows T<=8 (decode): tail_nonres=.. swaps=.. (..%) nonres_entries before=.. after=..
+```
 
 `tail_nonres` counts the ranks in that range whose expert the cache lacked, `swaps` those it could replace, and
 `before` / `after` are the non-resident entries of the ten, summed over the window's tokens, before and after the
