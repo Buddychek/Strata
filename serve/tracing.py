@@ -115,6 +115,22 @@ def parse_traceparent(header, tracestate=None) -> TraceContext | None:
     return TraceContext(parts[1].lower(), parts[2].lower(), parts[2].lower(), tracestate)
 
 
+def make_span(name: str, start_s: float, end_s: float, kind: int = 1, attrs=(),
+              trace_id: str | None = None, span_id: str | None = None,
+              parent_id: str | None = None, status_ok: bool = True) -> dict | None:
+    """One OTLP span from wall-clock seconds (Unix time), for a caller that measures its own phases -
+    the bench harness, the eval harness.  A phase with no time (end <= start, or a phase that never
+    ran) is left out rather than drawn as zero, as the server's spans are.  The ids default to fresh
+    ones, so a caller that wants its spans in one trace passes the trace_id it made for that trace."""
+    if start_s is None or end_s is None or end_s <= start_s:
+        return None
+    return {"traceId": trace_id or _rand(16), "spanId": span_id or _rand(8), "name": name, "kind": kind,
+            **({"parentSpanId": parent_id} if parent_id else {}),
+            "startTimeUnixNano": str(int(start_s * 1_000_000_000)),
+            "endTimeUnixNano": str(int(end_s * 1_000_000_000)),
+            "attributes": _attrs(attrs), "status": {"code": 1 if status_ok else 2}}
+
+
 class Tracing:
     """The per-request spans and their OTLP export.  One of these per server, held as `Service.tracing` (None: off)."""
 
@@ -150,6 +166,14 @@ class Tracing:
         if spans:
             self._enqueue({"resource": self._resource(), "scopeSpans":
                           [{"scope": {"name": SCOPE, "version": self.version or "1"}, "spans": spans}]})
+
+    def emit(self, spans: list) -> None:
+        """Hand a finished span list (built with make_span) to the export thread, as finish() does for a
+        request: one payload per call, so a caller's trace arrives in one POST and reads as one trace."""
+        if not spans:
+            return
+        self._enqueue({"resource": self._resource(), "scopeSpans":
+                       [{"scope": {"name": SCOPE, "version": self.version or "1"}, "spans": spans}]})
 
     def _spans(self, record: dict, ctx: TraceContext) -> list:
         started = record.get("started_at") or time.time()
