@@ -57,9 +57,11 @@ class TestWinJob(unittest.TestCase):
         finally:
             if parent.poll() is None:
                 parent.kill()
+            parent.stdout.close()       # the read end of the pipe: an open reader outlives the test
             for pid in (child, grandchild):              # on a failure, don't leave them sleeping
                 if pid and running(pid):
                     subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True)
+        self.assertTrue(parent.stdout.closed, "the pipe to the killed parent stayed open")
 
     def test_elsewhere_or_without_a_process_it_is_a_no_op(self):
         from serve.winjob import contain
