@@ -1744,8 +1744,12 @@ next request to line your spans up with ours.
 
 The export runs on its own thread and never blocks or fails a request: a collector that is down costs one line in
 the log and a counted drop. OTLP/HTTP is written as JSON by hand, so tracing adds no package to the install. With
-tracing on and the Monitor off, the record behind the spans holds timings and token counts only - the prompt and
-the answer text are never recorded, so no conversation text reaches a collector. The module is `serve/tracing.py`,
+tracing on and the Monitor off, the record behind the spans holds timings and token counts - not the prompt and not
+the answer. The one exception is the root span of a request that ends in an error: it carries the server-authored
+error text (its first 2000 characters) as the span's `exception.message` event, and for a structured-output
+validation failure that text quotes the model's answer verbatim (`serve/structured.py`). So a completed request's
+trace carries no conversation text, while an errored request's trace can carry answer text - name your endpoint with
+that in mind. The module is `serve/tracing.py`,
 covered by `serve/test_tracing.py`.
 
 ### Prompt buffers: `bo` shares `emb` (#1454)
