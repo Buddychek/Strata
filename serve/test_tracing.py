@@ -10,7 +10,8 @@ from pathlib import Path
 from serve.server import ByteTokenizer, MockEngine, Service, serve
 from serve.frontend import ChatTemplate
 from serve.runconfig import check
-from serve.tracing import (DEFAULT_ENDPOINT, Tracing, endpoint_from_config, endpoint_of, parse_traceparent)
+from serve.tracing import (DEFAULT_ENDPOINT, Tracing, endpoint_from_config, endpoint_of, make_span,
+                           parse_traceparent)
 
 
 class ClockEngine(MockEngine):
@@ -271,6 +272,60 @@ class LateSpansAndInstantRequests(unittest.TestCase):
             self.assertLess(int(prefill["startTimeUnixNano"]), int(prefill["endTimeUnixNano"]))
             self.assertLessEqual(int(root["startTimeUnixNano"]), int(prefill["startTimeUnixNano"]))
             self.assertLessEqual(int(prefill["endTimeUnixNano"]), int(root["endTimeUnixNano"]))
+        finally:
+            collector.stop()
+
+
+class HarnessSpans(unittest.TestCase):
+    """make_span + Tracing.emit: a caller that measures its own phases - the bench harness, the eval harness -
+    builds its spans from wall-clock seconds and hands them over; one emit arrives as one payload, one trace."""
+
+    def test_a_measured_phase_is_drawn_and_an_unmeasured_one_left_out(self):
+        t0 = time.time()
+        phase = make_span("bench.chat", t0, t0 + 1.5,
+                          attrs=[("bench.row", "4k"), ("bench.never_ran", None), ("bench.blank", "")])
+        self.assertIsNotNone(phase)
+        self.assertEqual(phase["name"], "bench.chat")
+        self.assertEqual(phase["kind"], 1)
+        self.assertEqual(int(phase["startTimeUnixNano"]), int(t0 * 1_000_000_000))
+        self.assertEqual(int(phase["endTimeUnixNano"]), int((t0 + 1.5) * 1_000_000_000))
+        self.assertEqual({a["key"] for a in phase["attributes"]}, {"bench.row"})  # None and "" drop out, as the server's
+        self.assertEqual(phase["status"]["code"], 1)
+        self.assertNotIn("parentSpanId", phase)                                   # a caller that gives no parent
+        for start, end in ((None, None), (t0, t0), (t0, t0 - 0.1)):               # never ran, instant, or negative
+            self.assertIsNone(make_span("bench.warmup", start, end))
+
+    def test_ids_are_fresh_unless_the_caller_groups_its_trace(self):
+        t0 = time.time()
+        root = make_span("bench.round", t0, t0 + 2.0, kind=2)
+        self.assertEqual(len(root["traceId"]), 32)
+        self.assertEqual(len(root["spanId"]), 16)
+        child = make_span("bench.chat", t0, t0 + 1.0, parent_id=root["spanId"], trace_id=root["traceId"])
+        self.assertEqual(child["traceId"], root["traceId"])                       # the round's spans share its trace
+        self.assertEqual(child["parentSpanId"], root["spanId"])
+        self.assertNotEqual(child["spanId"], root["spanId"])
+        other = make_span("bench.stop", t0 + 1, t0 + 2)
+        self.assertNotEqual(other["traceId"], root["traceId"])                    # fresh ids by default
+        self.assertNotEqual(other["spanId"], root["spanId"])
+        self.assertEqual(make_span("bench.failed", t0, t0 + 1, status_ok=False)["status"]["code"], 2)
+
+    def test_emit_posts_the_caller_spans_as_one_trace(self):
+        collector = Collector()
+        endpoint = collector.start()
+        tracing = Tracing(endpoint, model="strata-test", version="test")
+        try:
+            t0 = time.time()
+            root = make_span("bench.round", t0, t0 + 2.0, kind=2)
+            child = make_span("bench.chat", t0, t0 + 1.0, parent_id=root["spanId"], trace_id=root["traceId"])
+            tracing.emit([root, child])
+            tracing.emit([])                                                      # an empty call enqueues nothing
+            tracing.close(drain_s=2.0)
+            self.assertEqual(len(collector.received), 1)                          # one emit, one POST: one trace
+            spans = [s for scope in collector.received[0]["scopeSpans"] for s in scope["spans"]]
+            self.assertEqual(len(spans), 2)
+            self.assertEqual({s["traceId"] for s in spans}, {root["traceId"]})
+            self.assertEqual(tracing.exported, 2)
+            self.assertEqual(tracing.dropped, 0)
         finally:
             collector.stop()
 
