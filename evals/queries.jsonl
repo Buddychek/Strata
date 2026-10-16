@@ -6,3 +6,7 @@
 {"id": "three-planets", "prompt": "List three planets in our solar system as a comma-separated list.", "expect_all": ["Earth"], "expect_any": ["Mars", "Venus"], "mock_answer": "Mercury, Venus, Earth"}
 {"id": "train-speed", "prompt": "A train travels 60 km in 45 minutes. What is its speed in km/h?", "expect_all": ["80"], "mock_answer": "45 minutes is 0.75 hours, so 60 / 0.75 = 80 km/h."}
 {"id": "define-recursion", "prompt": "Give me a one-line definition of recursion.", "expect_all": ["itself"], "expect_any": ["recursion"], "mock_answer": "Recursion is when a function calls itself."}
+{"id": "fix-off-by-one", "prompt": "This Python is wrong: def add(a, b): return a - b. Fix it and reply with the corrected line.", "expect_all": ["return a + b"], "mock_answer": "def add(a, b):\n    return a + b"}
+{"id": "json-object", "prompt": "Reply with only a JSON object describing a person named Ada with age 36.", "expect_all": ["{", "\"name\"", "\"age\"", "36"], "mock_answer": "{\"name\": \"Ada\", \"age\": 36}"}
+{"id": "unicode-reply", "prompt": "Reply with the German word for greeting and the smiley emoji.", "expect_all": ["Grüße", "🙂"], "mock_answer": "Grüße 🙂"}
+{"id": "long-list", "prompt": "List the first ten prime numbers, one per line.", "expect_all": ["2", "3", "5", "7", "11", "13", "17", "19", "23", "29"], "max_tokens": 512, "mock_answer": "2\n3\n5\n7\n11\n13\n17\n19\n23\n29"}
