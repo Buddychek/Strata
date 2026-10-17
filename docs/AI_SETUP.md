@@ -120,6 +120,9 @@ Notes:
   One card per model and no images on Windows for now. It is new: ask the user to report how it runs (docs/AMD_HIP.md).
 - **NVIDIA with no ready-made engine for the card:** setup offers to install build tools and compile (20-40 minutes);
   `--yes` accepts.
+- **Re-running setup over an installed model (`--setup`):** the size list opens with the installed size pre-selected, so
+  `--yes` and Enter keep it - a re-run does not silently move a working install to the recommended (slower, larger) size.
+  A named `--model NAME` overrides it.
 
 ## 5. While it downloads, tell the user
 
