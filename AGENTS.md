@@ -19,6 +19,9 @@ offers the same steps as tools.
 - AMD (HIP) build and validation: [docs/AMD_HIP.md](docs/AMD_HIP.md); multi-GPU: [docs/MULTI_GPU.md](docs/MULTI_GPU.md).
 - Setup's own tests run without a GPU or downloads: `python tools/test_setup_<name>.py` (for example
   `tools/test_setup_amd.py`, `tools/test_setup_choices.py`).
+- The eval harness runs against the mock engine with no GPU, model or downloads: `python evals/run_eval.py`
+  (its own test: `python -m unittest evals.test_eval`; against a running server, `--base http://127.0.0.1:8080`).
+  Queries live in `evals/queries.jsonl` - [evals/README.md](evals/README.md).
 - Keep the docs' style: plain words, measured numbers with what they were measured on, no claims without a
   measurement.
 

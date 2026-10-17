@@ -34,6 +34,18 @@ settings; it cannot be turned back on without a reset of Windows), or, if only t
 An update keeps the engine it replaced in `engine\.previous` (one generation, about 210 MiB).
 `python setup.py --rollback-engine` puts it back (and keeps the newer one there: run it again to go forward) (#670).
 
+**The engine exits at start with "illegal instruction" (exit code 132 / `0xC000001D`), an access violation, or a signal (0.1.44.1, #2324).**
+When the OS ends the engine process at start - a CPU that cannot run its kernels, a bad memory access, the out-of-memory
+killer, a missing DLL - the engine writes nothing to its log. Such a start is now **not retried**: it used to be retried
+3 times as "the engine stopped while the GPU runtime was starting", which hid the real reason. The start error names how
+the process ended: `the engine process ended: killed by signal 4 (SIGILL, Illegal instruction)` (Linux/macOS) or
+`the engine process ended: exit code 0xC000001D: illegal instruction (the CPU lacks an instruction the program uses)`
+(Windows). After an illegal instruction it also prints the CPU's AVX / AVX2 / FMA / F16C flags: the ones it is missing,
+or, when it has them all, that the engine is at fault. An illegal instruction means this CPU cannot run the engine's CPU
+kernels: Strata needs AVX2 with FMA and F16C (Intel Haswell 2013, AMD Zen 2017, or newer). Compile an engine for this PC
+with `STRATA_ISA_FLOOR` - see [Older CPUs](INSTALL.md#older-cpus-experimental). If the CPU reports all four and the
+instruction is still illegal, open an [issue](https://github.com/Niko1221/Strata/issues) with the CPU model.
+
 **UPDATE.bat / update.sh say "git pull did not succeed", or "has no commit in common" (#1276).**
 The repository's history was cleaned up on 2026-10-06, so a clone made before that cannot be updated with `git pull`.
 The 0.1.40.2 scripts handle it: when no tracked file is edited they keep your old commits in the branch
