@@ -222,6 +222,12 @@ says so and starts the engine you had.
   on the CPU for now. [Details](DETAILS.md#images-vision).
 - **Experimental speed projection?** Off unless you say yes - [read what it does](DETAILS.md#experimental-speed-projection-experimental-off-by-default)
   first. It changes how the model answers, and only the original model offers it.
+- **Running setup again over an installed model?** `SETUP.bat` / `--setup` opens the size list with the installed size
+  pre-selected, so pressing Enter (and `--yes`) keeps that model - a re-run never moves a working install to the
+  recommended size, which can be slower and larger (IQ3_S on a 64 GB PC decodes about 15% slower than IQ3_XXS and needs
+  ~7 GB more RAM). The recommendation stays marked "(recommended)" and every size stays a choice; `--model NAME` picks a
+  size outright. Entries you set yourself in the model's `"env"` stay yours across a re-run; the ones setup manages (for
+  an Unsloth config: `STRATA_MMQ_KQ`, `STRATA_HC_Q8`, `STRATA_ROUTE_TAIL_SKIP`) are setup's to set.
 
 With `--yes` setup takes the recommended answer to every question.
 
