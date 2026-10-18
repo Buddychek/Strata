@@ -59,6 +59,11 @@ build-vision-cuda12.bat
 .idea/
 .cursor/
 
+# editor/bot scratch: VS Code local-history snapshots and the npm packages of
+# the .github/agents bot workspace (449 MB of node_modules, incl. minecraft-data)
+/.history/
+/.github/agents/node_modules/
+
 /.ccache/
 /.rocm-win/
 
