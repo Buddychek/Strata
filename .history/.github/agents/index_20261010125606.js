@@ -1,0 +1,13 @@
+const mineflayer = require(`mineflayer`)
+
+const bot = mineflayer.createBot({
+    host: `localhost`,
+    port: 60307,
+    username: `BudBot`
+})
+
+bot.on(`Chat`, (BudBot, Hallo) => {
+    if (message === bot.BudBot) return
+bot.chat(Hi)
+})
+

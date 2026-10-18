@@ -1,0 +1,15 @@
+{
+  "name": "worktree",
+  "version": "1.0.0",
+  "description": "<h1 align=\"center\">Strata</h1>",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs",
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC"
+}

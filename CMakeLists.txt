@@ -1452,6 +1452,14 @@ if(STRATA_NATIVE_EXPERTS)
     add_subdirectory(${STRATA_GGML_DIR}/ggml ${CMAKE_BINARY_DIR}/ggml EXCLUDE_FROM_ALL)
   else()
     include(FetchContent)
+    # CMP0169 (CMake 3.30+) deprecates FetchContent_Populate(<name>); CMake 4.4 warns on every configure.
+    # Strata keeps populate-then-add_subdirectory on purpose: it adds only the checkout's ggml/ into
+    # ${CMAKE_BINARY_DIR}/ggml with EXCLUDE_FROM_ALL, the same binary dir the STRATA_GGML_DIR branch above
+    # uses (MakeAvailable moves that dir, and honours EXCLUDE_FROM_ALL in FetchContent_Declare only from 3.28).
+    # Pin OLD, guarded so CMake < 3.30 (no such policy) still configures. Guard test: tools/test_fetchcontent_policy.py
+    if(POLICY CMP0169)
+      cmake_policy(SET CMP0169 OLD)
+    endif()
     FetchContent_Declare(strata_llamacpp
       GIT_REPOSITORY https://github.com/ggml-org/llama.cpp.git
       GIT_TAG 3cf03257f219afbe7334045ff7c6a06ac68c627d
