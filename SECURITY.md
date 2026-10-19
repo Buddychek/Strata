@@ -39,7 +39,9 @@ this PC only. The details and every setting are in [docs/DETAILS.md](docs/DETAIL
 - **MCP tools** are opt-in: only the servers you put in the run config, only for requests from Strata's own page
   that ask for them. They run with your user's rights, and the model decides when to call them.
 - **The request monitor** (`/api-monitor`, which keeps the last prompts and answers in memory) is off unless
-  `"api_monitor": true` is set.
+  `"api_monitor": true` is set. Apart from it, the server keeps in its process memory the text and tokens of its
+  last few prompts, whatever `"api_monitor"` says, to encode the next turn faster; no endpoint shows them, and they
+  are gone when the server stops.
 - **Tracing** (`--trace-otlp`, `"trace_otlp"`, `$STRATA_TRACE_OTLP`) sends OpenTelemetry spans of each `/v1` request -
   timings and token counts - to an OTLP endpoint you name. It is off by default; with no endpoint nothing runs. With
   the request monitor off, the spans carry timings and token counts, not the prompt and not the answer - with one

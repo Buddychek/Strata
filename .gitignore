@@ -68,6 +68,9 @@ build-vision-cuda12.bat
 /.ccache/
 /.rocm-win/
 
+# local Windows HIP packaging output
+dist-hip/
+
 # local notes written by scheduled scans (kept out of version control)
 security-findings.local.md
 bug-hunter-state.local.md
