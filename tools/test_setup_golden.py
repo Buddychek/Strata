@@ -102,6 +102,9 @@ def install(ram, found, argv, answers=None, extra=(), avx512=False, configs=()):
             mock.patch.object(setup, "ram_gb", lambda: ram),
             mock.patch.object(setup, "cpu_info", lambda: ("Test CPU", True, avx512)),
             mock.patch.object(setup, "cpu_cores", lambda: None),   # #642: not a hybrid CPU
+            mock.patch.object(setup.os, "cpu_count", lambda: 12),  # the baseline PC's cores: the CPU vision
+            #                                          encoder's threads are cpu_count // 2 (6 in the baseline);
+            #                                          without this the test compares against the running PC's cores
             mock.patch.object(setup, "page_file_gb", lambda: 16.0),
             mock.patch.object(setup, "is_wsl", lambda: False),
             mock.patch.object(setup, "rotational_disk", lambda p: None),   # #605: the test PC's own disk
