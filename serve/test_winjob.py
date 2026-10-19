@@ -63,10 +63,6 @@ class TestWinJob(unittest.TestCase):
         self.assertFalse(contain(None))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 @unittest.skipUnless(os.name == "nt", "power throttling is a Windows setting")
 class TestNoThrottle(unittest.TestCase):
     def test_a_contained_child_is_opted_out_of_power_throttling(self):
@@ -80,3 +76,7 @@ class TestNoThrottle(unittest.TestCase):
         finally:
             child.kill()
             child.wait(10)
+
+
+if __name__ == "__main__":
+    unittest.main()
