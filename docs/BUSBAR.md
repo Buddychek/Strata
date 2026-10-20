@@ -30,7 +30,7 @@ python tools/busbar_gateway.py --config busbar.json --plan --requests 20
 | `--port` | Port, default `8080` |
 | `--token` | Require this key on every request. Empty means no key, which is only safe on `127.0.0.1` |
 | `--plan` | Show how the next requests are routed, then exit |
-| `--pool` | Which pool `--plan` shows, default the first one |
+| `--pool` | Which pool `--plan` shows, default the first one. A name that is not a pool prints an error and exits with 2 |
 | `--requests` | How many requests `--plan` shows, default 100 |
 
 ## The config
@@ -79,6 +79,10 @@ the gateway answers 502 with the last error.
 A pool name your client sends must exist. A typo is an error, not a silent fallback to the default pool, so traffic does
 not quietly go somewhere else.
 
+A member whose connection dies before an answer - a socket closed in the middle of the request, which Windows reports as
+an abort - is a failure like any other: the request moves to the next member. A stream the provider cuts short is counted
+as a failure too; a client that walks away mid-stream is not, because the provider did answer.
+
 ## Endpoints
 
 | Route | What it returns |
@@ -105,6 +109,7 @@ The routing rules are checked without any network or provider key, using stand-i
 python -m unittest tools.test_busbar_gateway
 ```
 
-27 tests cover the exact split, the spread, failover to another pool, cooldown, cooldown of a failover member, the
-payload for both wires, the Anthropic-to-OpenAI conversion, streaming in both directions, and the HTTP routes including
-the key check.
+34 tests cover the exact split, the spread, failover to another pool, cooldown, cooldown of a failover member, the
+payload for both wires, the Anthropic-to-OpenAI conversion, streaming in both directions, a stream the provider cuts
+short, a client that stops reading, the `--plan` flag, and the HTTP routes including the key check and the streaming
+route end to end.

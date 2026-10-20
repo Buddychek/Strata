@@ -43,6 +43,8 @@ Config (see tools/busbar.example.json):
 from __future__ import annotations
 
 import argparse
+import hmac
+import http.client
 import json
 import os
 import sys
@@ -147,6 +149,11 @@ class Pool:
         ready = [m for m in self.members if self.until[m.name] <= now]
         return ready or list(self.members)      # all cooling: give the first one another try
 
+    def open_members(self, now: float) -> list[Member]:
+        """The same list read under the pool's lock: a failover pool is looked at from another pool's pick."""
+        with self.lock:
+            return self._open(now)
+
     def pick(self) -> list[tuple[Pool, Member]]:
         """The order to try: the member this request is owed, then the rest by debt, then the failover pools.
         Each entry carries the pool it belongs to, so a request answered by a failover member is counted there."""
@@ -164,7 +171,7 @@ class Pool:
         # reached them must not move their round robin, and a member on cooldown there stays on cooldown.
         now = time.time()
         for pool in self.failover:
-            order.extend((pool, m) for m in sorted(pool._open(now), key=lambda m: (-m.weight, m.name)))
+            order.extend((pool, m) for m in sorted(pool.open_members(now), key=lambda m: (-m.weight, m.name)))
         return order
 
     def note_ok(self, member: Member, tokens: int) -> None:
@@ -221,7 +228,7 @@ class Registry:
 
     def plan(self, pool_name: str, requests: int) -> list[str]:
         """Which member each of the next `requests` requests to this pool would get, without sending anything."""
-        pool = self.pools[pool_name]
+        pool = self.resolve(pool_name)
         return [pool.pick()[0][1].name for _ in range(requests)]
 
 
@@ -242,7 +249,11 @@ def openai_from_anthropic(body: dict, model: str) -> dict:
 
 
 def call(member: Member, body: dict, timeout: float):
-    """Send one request. Returns (response object, parsed JSON) - the response is open for streaming calls."""
+    """Send one request and return the open response; the caller reads it, whole or line by line.
+
+    An upstream that aborts the socket before a status line arrives raises the raw OSError here (on
+    Windows, WinError 10053), so the callers catch OSError rather than only urllib's own errors.
+    """
     url, payload, headers = member.request(body, bool(body.get("stream")))
     req = urllib.request.Request(url, data=payload, headers=headers)
     return urllib.request.urlopen(req, timeout=timeout)
@@ -257,7 +268,7 @@ class Gateway:
         if not self.token:
             return True
         given = (header or "").replace("Bearer ", "").strip()
-        return given == self.token
+        return hmac.compare_digest(given, self.token)
 
     def complete(self, body: dict) -> tuple[int, dict]:
         """Non-streaming: try members in order until one answers."""
@@ -271,7 +282,7 @@ class Gateway:
                     data = openai_from_anthropic(data, member.model)
                 owner.note_ok(member, usage_tokens(data))
                 return 200, data
-            except (urllib.error.URLError, urllib.error.HTTPError, ValueError, TimeoutError) as exc:
+            except (OSError, http.client.HTTPException, ValueError) as exc:
                 owner.note_fail(member)
                 last_error = f"{member.name}: {exc}"
         return 502, {"error": {"type": "busbar_error",
@@ -283,7 +294,7 @@ class Gateway:
         for owner, member in pool.pick():
             try:
                 resp = call(member, body, owner.timeout)
-            except (urllib.error.URLError, urllib.error.HTTPError, ValueError, TimeoutError) as exc:
+            except (OSError, http.client.HTTPException, ValueError) as exc:
                 owner.note_fail(member)
                 continue
             handler.send_response(200)
@@ -291,12 +302,22 @@ class Gateway:
             handler.send_header("Cache-Control", "no-cache")
             handler.end_headers()
             tokens = 0
+            upstream_broke = False     # the provider cut the stream before it ended
+
+            def emit(chunk: bytes) -> bool:
+                try:
+                    handler.wfile.write(chunk)
+                    handler.wfile.flush()
+                    return True
+                except OSError:
+                    return False
+
             try:
                 for raw in resp:
                     line = raw.decode("utf-8", "replace").strip()
                     if member.wire == "openai":
-                        handler.wfile.write(raw)
-                        handler.wfile.flush()
+                        if not emit(raw):
+                            break          # the client stopped reading: the member did answer
                         if line.startswith("data:") and line[5:].strip() not in ("[DONE]", ""):
                             try:
                                 for ch in json.loads(line[5:].strip()).get("choices", []):
@@ -313,17 +334,21 @@ class Gateway:
                         if ev.get("type") == "content_block_delta":
                             text = (ev.get("delta") or {}).get("text") or ""
                             tokens += len(text)
-                            handler.wfile.write(b"data: " + json.dumps(
-                                {"object": "chat.completion.chunk", "model": member.model,
-                                 "choices": [{"index": 0, "delta": {"content": text}}]}).encode() + b"\n\n")
+                            if not emit(b"data: " + json.dumps(
+                                    {"object": "chat.completion.chunk", "model": member.model,
+                                     "choices": [{"index": 0, "delta": {"content": text}}]}).encode() + b"\n\n"):
+                                break          # the client stopped reading: the member did answer
                         elif ev.get("type") == "message_stop":
-                            handler.wfile.write(b"data: [DONE]\n\n")
-                        handler.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError):
-                pass
+                            if not emit(b"data: [DONE]\n\n"):
+                                break          # the client stopped reading: the member did answer
+            except (OSError, http.client.HTTPException):
+                upstream_broke = True
             finally:
                 resp.close()
-            owner.note_ok(member, tokens)
+            if upstream_broke:
+                owner.note_fail(member)     # a stream cut short is a failure, not an answered request
+            else:
+                owner.note_ok(member, tokens)
             return
         handler.send_response(502)
         handler.send_header("Content-Type", "application/json")
@@ -423,7 +448,11 @@ def main(argv=None) -> int:
             print(f"pool {name}: " + ", ".join(f"{m.name} {m.weight:g}" for m in pool.members) +
                   (f"  failover: {', '.join(pool.failover_names)}" if pool.failover_names else ""))
         target = args.pool or next(iter(registry.pools))
-        order = registry.plan(target, args.requests)
+        try:
+            order = registry.plan(target, args.requests)
+        except ValueError as exc:
+            print(f"[busbar] {exc}", file=sys.stderr)
+            return 2
         tally = {}
         for name in order:
             tally[name] = tally.get(name, 0) + 1

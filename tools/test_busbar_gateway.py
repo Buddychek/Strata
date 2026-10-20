@@ -9,9 +9,11 @@ skipped until the cooldown ends.
 """
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -287,6 +289,40 @@ class HttpServer(unittest.TestCase):
             self.assertEqual(exc.code, 401)
 
 
+class Plan(unittest.TestCase):
+    """`--plan` and the pool lookup share the same rule: a name that is not a pool is an error."""
+
+    def test_planning_an_unknown_pool_is_an_error(self):
+        reg = registry_from(cfg([{"name": "a", "weight": 1, "base_url": "u", "model": "a"}]))
+        with self.assertRaises(ValueError):
+            reg.plan("ghost", 3)
+
+    def test_plan_with_no_name_uses_the_default_pool(self):
+        reg = registry_from(cfg([{"name": "a", "weight": 1, "base_url": "u", "model": "a"}]))
+        self.assertEqual(reg.plan(None, 2), ["a", "a"])
+
+
+class PlanCli(unittest.TestCase):
+    """The `--plan` flag prints the routing and sends nothing, and a bad pool name is a clean exit."""
+
+    def test_plan_prints_the_split_and_rejects_an_unknown_pool(self):
+        config = {"default_pool": "fast", "pools": {"fast": {"members": [
+            {"name": "claude", "weight": 80, "base_url": "http://127.0.0.1:1", "model": "c"},
+            {"name": "gpt", "weight": 20, "base_url": "http://127.0.0.1:1", "model": "g"}]}}}
+        path = Path(tempfile.mktemp(suffix=".json"))
+        path.write_text(json.dumps(config), encoding="utf-8")
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                self.assertEqual(G.main(["--config", str(path), "--plan", "--requests", "10"]), 0)
+                self.assertEqual(G.main(["--config", str(path), "--plan", "--pool", "ghost"]), 2)
+        finally:
+            path.unlink()
+        self.assertIn("claude", out.getvalue())
+        self.assertIn("counts: claude=8, gpt=2", out.getvalue())
+        self.assertIn("no pool named", err.getvalue())
+
+
 class Streaming(unittest.TestCase):
     """The streaming path against a real local upstream that answers with SSE, one wire per provider."""
 
@@ -327,6 +363,9 @@ class Streaming(unittest.TestCase):
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+                self.wfile.flush()   # a real SSE server sends each event at once; without this the
+                # stand-in closes the socket with the events still in its write buffer, which on Windows
+                # aborts the connection now and then (WinError 10053, once in ~60 runs)
 
         srv = G.ThreadingHTTPServer(("127.0.0.1", 0), Up)
         t = threading.Thread(target=srv.serve_forever)
@@ -394,6 +433,136 @@ class Streaming(unittest.TestCase):
             thread.join()
             srv.server_close()
 
+
+    def test_an_upstream_that_drops_the_connection_fails_over(self):
+        """A socket that dies before a status line is a failure, not a crash: the next member answers."""
+        srv, thread = self._upstream([{"choices": [{"delta": {"content": "backup"}}]}, "[DONE]"])
+
+        class Drop(BaseHTTPRequestHandler):
+            def log_message(self, fmt, *args):
+                pass
+
+            def do_POST(self):
+                self.connection.close()          # no status line at all
+
+        dead = G.ThreadingHTTPServer(("127.0.0.1", 0), Drop)
+        dead_thread = threading.Thread(target=dead.serve_forever)
+        dead_thread.start()
+        try:
+            collector, reg = self._stream(
+                [{"name": "drop", "weight": 5, "wire": "openai",
+                  "base_url": f"http://127.0.0.1:{dead.server_port}", "model": "d"},
+                 {"name": "live", "weight": 1, "wire": "openai",
+                  "base_url": f"http://127.0.0.1:{srv.server_port}", "model": "l"}])
+            self.assertEqual(collector.status, 200)
+            self.assertIn("backup", collector.buf.getvalue().decode())
+            self.assertEqual(reg.pools["fast"].errors["drop"], 1)
+            self.assertEqual(reg.pools["fast"].counts["live"], 1)
+        finally:
+            dead.shutdown()
+            dead_thread.join()
+            dead.server_close()
+            srv.shutdown()
+            thread.join()
+            srv.server_close()
+
+    def test_streaming_works_through_the_real_http_handler(self):
+        """Route and stream together: a real client POSTs to /v1/chat/completions and gets the SSE back."""
+        srv, thread = self._upstream([{"choices": [{"delta": {"content": "hi"}}]}, "[DONE]"])
+        reg = registry_from(cfg([{"name": "gpt", "weight": 1, "wire": "openai",
+                                 "base_url": f"http://127.0.0.1:{srv.server_port}", "model": "g"}]))
+        gateway = G.ThreadingHTTPServer(("127.0.0.1", 0), G.make_handler(G.Gateway(reg, "key")))
+        gw_thread = threading.Thread(target=gateway.serve_forever)
+        gw_thread.start()
+        try:
+            req = urllib.request.Request(f"http://127.0.0.1:{gateway.server_port}/v1/chat/completions",
+                                        data=json.dumps({"model": "fast", "stream": True,
+                                                        "messages": [{"role": "user", "content": "hi"}]}).encode(),
+                                        headers={"Authorization": "Bearer key", "Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=5) as r:
+                out = r.read().decode()
+            self.assertIn("hi", out)
+            self.assertIn("[DONE]", out)
+            self.assertEqual(reg.pools["fast"].tokens["gpt"], 2)
+        finally:
+            gateway.shutdown()
+            gw_thread.join()
+            gateway.server_close()
+            srv.shutdown()
+            thread.join()
+            srv.server_close()
+
+    def test_a_stream_the_upstream_cut_off_short_counts_as_a_failure(self):
+        """A member that stops in the middle of a stream is not a member that answered."""
+
+        class Cut(BaseHTTPRequestHandler):
+            def log_message(self, fmt, *args):
+                pass
+
+            def do_POST(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Transfer-Encoding", "chunked")
+                self.end_headers()
+                self.wfile.write(b"12\ndata: hello\n")     # the closing chunk never comes
+                self.wfile.flush()
+                self.close_connection = True
+
+        dead = G.ThreadingHTTPServer(("127.0.0.1", 0), Cut)
+        thread = threading.Thread(target=dead.serve_forever)
+        thread.start()
+        try:
+            collector, reg = self._stream(
+                [{"name": "cut", "weight": 1, "wire": "openai",
+                  "base_url": f"http://127.0.0.1:{dead.server_port}", "model": "c"}])
+            self.assertEqual(collector.status, 200)
+            self.assertEqual(reg.pools["fast"].errors["cut"], 1)
+            self.assertEqual(reg.pools["fast"].counts["cut"], 0)
+        finally:
+            dead.shutdown()
+            thread.join()
+            dead.server_close()
+
+    def test_a_client_that_walks_away_is_not_blamed_on_the_member(self):
+        """The provider answered; only the reader went away, so the member stays healthy."""
+
+        class WalksAway:
+            def __init__(self):
+                self.status = 0
+                self.headers = {}
+                self.writes = 0
+
+            def send_response(self, status):
+                self.status = status
+
+            def send_header(self, key, value):
+                self.headers[key] = value
+
+            def end_headers(self):
+                pass
+
+            @property
+            def wfile(self):
+                self.writes += 1
+                if self.writes > 1:
+                    raise BrokenPipeError("the client closed the connection")
+                return io.BytesIO()
+
+        srv, thread = self._upstream([{"choices": [{"delta": {"content": "hi"}}]}, "[DONE]"])
+        try:
+            reg = registry_from(cfg([{"name": "gpt", "weight": 1, "wire": "openai",
+                                     "base_url": f"http://127.0.0.1:{srv.server_port}", "model": "g"}]))
+            gw = G.Gateway(reg, "")
+            walker = WalksAway()
+            gw.stream(walker, {"model": "fast", "stream": True, "messages": [{"role": "user", "content": "hi"}]})
+            self.assertEqual(walker.status, 200)
+            self.assertEqual(walker.writes, 2)          # one chunk written, then the client is gone
+            self.assertEqual(reg.pools["fast"].counts["gpt"], 1)
+            self.assertEqual(reg.pools["fast"].errors["gpt"], 0)
+        finally:
+            srv.shutdown()
+            thread.join()
+            srv.server_close()
 
 if __name__ == "__main__":
     unittest.main()
