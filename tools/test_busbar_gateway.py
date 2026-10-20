@@ -12,6 +12,8 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import socket
+import struct
 import sys
 import tempfile
 import threading
@@ -25,6 +27,20 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 import busbar_gateway as G  # noqa: E402
+
+
+def graceful_close(sock: socket.socket) -> None:
+    """Make a close of this connection wait for the peer to confirm the sent bytes.
+
+    Windows sockets sit on a layered provider: a close while the last writes are
+    still in the send queue discards them and aborts the connection (WinError
+    10053), which on a local test upstream races the reader ~1 in 60 runs. A
+    positive SO_LINGER timeout makes close() finish the graceful shutdown
+    (drain, FIN, confirm) and return once the peer confirmed - bounded by the
+    timeout, so a test never blocks on a peer that ignores it.
+    """
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                    struct.pack("ii", 1, 5))
 
 
 class FakeGateway(G.Gateway):
@@ -357,6 +373,10 @@ class Streaming(unittest.TestCase):
             def log_message(self, fmt, *args):
                 pass
 
+            def setup(self):
+                super().setup()
+                graceful_close(self.connection)   # the body below must survive the handler's close
+
             def do_POST(self):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
@@ -366,6 +386,9 @@ class Streaming(unittest.TestCase):
                 self.wfile.flush()   # a real SSE server sends each event at once; without this the
                 # stand-in closes the socket with the events still in its write buffer, which on Windows
                 # aborts the connection now and then (WinError 10053, once in ~60 runs)
+                # SO_LINGER alone is not enough on Windows: give the OS a moment to
+                # deliver what the flush sent before the handler's close runs.
+                time.sleep(0.25)
 
         srv = G.ThreadingHTTPServer(("127.0.0.1", 0), Up)
         t = threading.Thread(target=srv.serve_forever)
@@ -499,6 +522,10 @@ class Streaming(unittest.TestCase):
             def log_message(self, fmt, *args):
                 pass
 
+            def setup(self):
+                super().setup()
+                graceful_close(self.connection)   # the cut must arrive as an EOF, not as an abort
+
             def do_POST(self):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
@@ -506,6 +533,7 @@ class Streaming(unittest.TestCase):
                 self.end_headers()
                 self.wfile.write(b"12\ndata: hello\n")     # the closing chunk never comes
                 self.wfile.flush()
+                time.sleep(0.25)   # let the reader receive the cut-off stream before the close runs
                 self.close_connection = True
 
         dead = G.ThreadingHTTPServer(("127.0.0.1", 0), Cut)
